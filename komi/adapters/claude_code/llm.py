@@ -120,9 +120,26 @@ Rules:
 - Be conservative: a wrong "global" leaks specifics into a public pool. Default "project"."""
 
 
-def build_llm() -> "AnthropicLLM | NullLLM":
+def build_llm(*, prefer: str = "cli"):
+    """Pick a backend for the distiller/judge.
+
+    Default preference is the ``claude`` CLI (uses the user's OAuth subscription —
+    no extra cost, no API key needed), then the Anthropic API (if a key is set),
+    then a safe no-op. The chosen client implements both ``LLMClient`` and
+    ``ScopeJudge`` so it can drive distillation and scope classification.
+    """
+    if prefer == "cli":
+        try:
+            from .llm_cli import ClaudeCLILLM
+            cli = ClaudeCLILLM()
+            if cli.available:
+                return cli
+        except Exception:
+            pass
     a = AnthropicLLM()
-    return a if a.available else NullLLM()
+    if a.available:
+        return a
+    return NullLLM()
 
 
 __all__ = ["AnthropicLLM", "NullLLM", "build_llm"]
