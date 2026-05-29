@@ -15,6 +15,13 @@ the hash of the content, two people who independently distill the same lesson
 produce the *same path* — so a duplicate is a no-op, and a second contributor
 signing the same file is *corroboration*, not a conflict.
 
+**Corroboration (Phase 5b).** A learning carries a ``signatures`` array — one
+entry per distinct contributor who independently signed the same content. The
+legacy single ``signer`` + ``provenance.signature`` shape is still valid and
+counts as signature #1 (so older files and the live pool need no re-signing);
+``signatures[0]`` mirrors it. The count of *distinct, valid* signers is the
+corroboration level, computed on pull (never stored in the content id).
+
 See docs/02-architecture.md §7 and the komi-pool repo template.
 """
 
@@ -53,12 +60,22 @@ def render_md(envelope: dict) -> str:
     by the body prose, then the canonical envelope JSON in a fenced block. The JSON
     block is the source of truth for verification; the prose above it is for humans.
     """
+    from .corroboration import envelope_signatures
+
     learning = envelope["learning"]
-    signer = envelope.get("signer", {})
     title = (learning.get("title") or "").strip()
     body = (learning.get("body") or "").strip()
     trigger = (learning.get("trigger") or "").strip()
     tags = learning.get("tags") or []
+
+    sigs = envelope_signatures(envelope)
+    primary = sigs[0] if sigs else {"public_key": "(unsigned)", "algo": "unsigned"}
+    # Show every distinct endorser so a PR reviewer sees corroboration at a glance.
+    if len(sigs) <= 1:
+        signer_line = f"> **Signer:** `{primary.get('public_key', '(unsigned)')[:16]}…` ({primary.get('algo', 'unsigned')})  "
+    else:
+        keys = ", ".join(f"`{s['public_key'][:12]}…`" for s in sigs)
+        signer_line = f"> **Signers ({len(sigs)} — corroborated):** {keys}  "
 
     payload = json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True)
 
@@ -69,7 +86,7 @@ def render_md(envelope: dict) -> str:
         f"> **Type:** {learning.get('type', '')}  ",
         f"> **Use when:** {trigger or '—'}  ",
         f"> **Tags:** {', '.join(tags) if tags else '—'}  ",
-        f"> **Signer:** `{signer.get('public_key', '(unsigned)')[:16]}…` ({signer.get('algo', 'unsigned')})  ",
+        signer_line,
         f"> **ID:** `{learning.get('id', '')}`",
         "",
         body,

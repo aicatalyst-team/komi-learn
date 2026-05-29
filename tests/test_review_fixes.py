@@ -84,13 +84,34 @@ def test_signature_covers_origin_and_identity(tmp_path):
     env = prepare_contribution(g, c).envelope
     rs = (c.algo == "ed25519")
     assert ingest_verify(env, require_signature=rs).accepted is True
-    # origin tamper rejected
+    # origin tamper rejected (origin is inside every signer's signed message)
     e2 = copy.deepcopy(env); e2["learning"]["provenance"]["origin"] = "agent:FORGED"
     assert ingest_verify(e2, require_signature=rs).accepted is False
-    # signer-pubkey swap rejected (no replay under another identity)
+    # signer-pubkey swap rejected (no replay under another identity). The
+    # ``signatures`` array is authoritative, so swap the identity THERE.
     c2 = Contributor(tmp_path / "k2")
-    e3 = copy.deepcopy(env); e3["signer"]["public_key"] = c2.public_key
+    e3 = copy.deepcopy(env); e3["signatures"][0]["public_key"] = c2.public_key
     assert ingest_verify(e3, require_signature=rs).accepted is False
+
+
+def test_legacy_single_signer_swap_rejected(tmp_path):
+    """Back-compat: a legacy-format file (no ``signatures`` array, just
+    ``signer`` + ``provenance.signature``) must still reject an identity swap."""
+    from komi.pool.identity import Contributor
+    from komi.pool.contribute import prepare_contribution, ingest_verify
+    import copy
+    if not Contributor(tmp_path / "probe").algo == "ed25519":
+        return  # unsigned mode (no PyNaCl) — nothing to verify
+    c = Contributor(tmp_path / "k")
+    c2 = Contributor(tmp_path / "k2")
+    g = Learning(type=LearningType.PROCEDURAL.value, category=Category.TOOLING.value,
+                 title="t", body="b", trigger="w", tags=["x"], scope=Scope.GLOBAL.value).finalize()
+    env = prepare_contribution(g, c).envelope
+    legacy = copy.deepcopy(env)
+    legacy.pop("signatures", None)                       # strip to legacy shape
+    assert ingest_verify(legacy, require_signature=True).accepted is True
+    legacy["signer"]["public_key"] = c2.public_key       # swap identity
+    assert ingest_verify(legacy, require_signature=True).accepted is False
 
 
 # ── #42: expanded secret/identifier detectors ──────────────────────────────

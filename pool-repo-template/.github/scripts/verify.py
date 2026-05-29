@@ -12,11 +12,15 @@ komi/engine/classify.py). The pieces reproduced here are small and stable.
 Checks, for every learning .md under learnings/ (or just the files passed):
   1. parses (valid fenced ``komi`` envelope with required fields)
   2. content-addressed id matches the content  (tamper-evidence)
-  3. Ed25519 signature verifies against the embedded signer key
+  3. EVERY embedded signature verifies against its own signer key, and at least
+     one distinct signer is valid (corroboration ≥ 1). A learning may carry a
+     ``signatures`` array (multiple independent endorsers) or the legacy single
+     ``signer`` shape — both are accepted.
   4. safety scrub finds no secrets / PII / machine identifiers
   5. file lives at the correct content-addressed path
 
-Exit non-zero if any file fails, so CI blocks the merge.
+Exit non-zero if any file fails, so CI blocks the merge. A claimed-but-invalid
+signature is a failure: the pool must never carry a signature that doesn't verify.
 
 Usage:
   python verify.py                       # all files under learnings/
@@ -107,6 +111,56 @@ def verify_signature(message: bytes, signature_b64: str, public_key_b64: str) ->
         return True
     except Exception:
         return False
+
+
+# ── corroboration (mirror of komi/pool/corroboration.py) ────────────────────
+# MUST mirror that module: how distinct endorsers are extracted + counted.
+
+def envelope_signatures(envelope: dict) -> list:
+    """Normalize to [{algo, public_key, signature}], handling both the new
+    ``signatures`` array and the legacy single-``signer`` shape. De-dupes by key."""
+    out, seen = [], set()
+    raw = envelope.get("signatures")
+    if isinstance(raw, list) and raw:
+        for s in raw:
+            if not isinstance(s, dict):
+                continue
+            pk = s.get("public_key") or ""
+            if not pk or pk in seen:
+                continue
+            seen.add(pk)
+            out.append({"algo": s.get("algo", "unsigned"), "public_key": pk,
+                        "signature": s.get("signature") or ""})
+        return out
+    signer = envelope.get("signer", {}) or {}
+    pk = signer.get("public_key") or ""
+    sig = (envelope.get("learning", {}).get("provenance", {}) or {}).get("signature") or ""
+    if pk:
+        out.append({"algo": signer.get("algo", "unsigned"), "public_key": pk, "signature": sig})
+    return out
+
+
+def signature_problems(envelope: dict) -> tuple:
+    """Return (num_valid_distinct_signers, [problems]). EVERY claimed signature
+    must verify — a signature that's present but invalid is a hard failure (the
+    pool must never carry a bogus signature), even if other signers are valid."""
+    learning = envelope.get("learning", {})
+    sigs = envelope_signatures(envelope)
+    if not sigs:
+        return 0, ["no signature present"]
+    valid, problems = 0, []
+    for s in sigs:
+        pk, sig = s["public_key"], s["signature"]
+        if not sig:
+            problems.append(f"signer {pk[:12]}… has no signature")
+            continue
+        if verify_signature(_signing_message(learning, pk), sig, pk):
+            valid += 1
+        else:
+            problems.append(f"signature for signer {pk[:12]}… is invalid")
+    if valid == 0 and not problems:
+        problems.append("no valid signature")
+    return valid, problems
 
 
 # ── safety scrub (mirror of komi/engine/classify.py detectors) ──────────────
@@ -212,10 +266,11 @@ def check_file(path: Path, *, require_signature: bool, repo_root: Path) -> list[
         problems.append(f"{path}: id does not match content (tampered or malformed)")
 
     if require_signature:
-        sig = lng.get("provenance", {}).get("signature")
-        pk = env.get("signer", {}).get("public_key", "")
-        if not verify_signature(_signing_message(lng, pk), sig or "", pk):
-            problems.append(f"{path}: signature missing or invalid")
+        valid, sig_probs = signature_problems(env)
+        for sp in sig_probs:
+            problems.append(f"{path}: {sp}")
+        if valid < 1:
+            problems.append(f"{path}: no valid signature (corroboration 0)")
 
     joined = " \n ".join([lng.get("title", ""), lng.get("body", ""),
                           lng.get("trigger", ""), " ".join(lng.get("tags", []))])

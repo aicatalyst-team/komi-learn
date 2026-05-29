@@ -68,8 +68,19 @@ def _recency_score(updated_at: str, *, half_life_days: float = 30.0) -> float:
     return 0.5 ** (age_days / half_life_days)
 
 
+def _col(row, key, default=0):
+    """Read a column from a sqlite3.Row OR a plain dict (vector_search returns dicts),
+    tolerating older rows/test fixtures that predate a column."""
+    try:
+        val = row[key]
+    except (KeyError, IndexError):
+        return default
+    return default if val is None else val
+
+
 def _rank_score(row, similarity: float) -> float:
-    """Blend of four signals: 0.4·similarity + 0.3·salience + 0.2·recency + 0.1·depth.
+    """Blend: 0.4·similarity + 0.3·salience + 0.2·recency + 0.1·depth, then a small
+    corroboration bonus for community (pool) learnings.
 
     ``similarity`` is already normalized to (0,1] by the caller — cosine similarity
     for semantic recall, or a squashed bm25 score for keyword fallback. Similarity
@@ -80,12 +91,25 @@ def _rank_score(row, similarity: float) -> float:
     reused → ranks higher → surfaced more), ossifying recall around a few "greatest
     hits" and starving newer/rarer-but-relevant learnings. log1p flattens the curve
     so reuse is a gentle nudge, not a runaway multiplier — relevance still wins.
+
+    Corroboration (Phase 5b): a pool learning independently signed by N distinct
+    contributors is more trustworthy than one signed by one. We add a small,
+    LOG-DAMPENED bonus (same anti-runaway discipline as reuse), capped low so it can
+    nudge ties toward well-corroborated community knowledge without ever overriding
+    relevance. Personal/project learnings have corroboration=1 → zero bonus, so this
+    only ever helps the *untrusted* pool items earn their place.
     """
-    reuse = max(0, row["reused"] or 0)
-    salience = min(1.0, (row["confidence"] or 0.0) * (1.0 + 0.5 * math.log1p(reuse)))
-    recency = _recency_score(row["updated_at"] or "")
-    depth = min(1.0, (row["confidence"] or 0.0))
-    return 0.4 * max(0.0, similarity) + 0.3 * salience + 0.2 * recency + 0.1 * depth
+    reuse = max(0, _col(row, "reused", 0))
+    confidence = _col(row, "confidence", 0.0) or 0.0
+    salience = min(1.0, confidence * (1.0 + 0.5 * math.log1p(reuse)))
+    recency = _recency_score(_col(row, "updated_at", "") or "")
+    depth = min(1.0, confidence)
+    base = 0.4 * max(0.0, similarity) + 0.3 * salience + 0.2 * recency + 0.1 * depth
+
+    corrob = max(1, _col(row, "corroboration", 1))
+    # 0 at corrob=1, ~0.07 at 3, ~0.11 at 5, capped at 0.15 — a tie-breaker, not a lever.
+    corrob_bonus = min(0.15, 0.10 * math.log1p(corrob - 1))
+    return base + corrob_bonus
 
 
 def _candidate_hits(store: Store, query: str, *, limit: int, scopes):
@@ -207,7 +231,12 @@ def _render(identity, jit, cfg: RecallConfig) -> str:
         if has_community:
             parts.append(_COMMUNITY_NOTE)
         for r in jit:
-            tag = " [community]" if r["scope"] == Scope.GLOBAL.value else ""
+            tag = ""
+            if r["scope"] == Scope.GLOBAL.value:
+                # Surface corroboration so the model can weight independent agreement:
+                # "[community ×4]" = four distinct contributors signed this same lesson.
+                c = max(1, _col(r, "corroboration", 1))
+                tag = f" [community ×{c}]" if c > 1 else " [community]"
             title = _sanitize(r["title"])
             body = _sanitize(_clip(r["body"], 240))
             trig_txt = _sanitize(r["trigger"]) if r["trigger"] else ""

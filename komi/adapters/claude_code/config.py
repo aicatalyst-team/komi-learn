@@ -33,6 +33,7 @@ class Config:
     pool_mode: str = "pr"                 # "pr" (open PRs) | "local" (commit directly)
     pool_branch: str = "main"
     pool_require_signature: bool = True
+    pool_min_corroboration: int = 1       # only pull pool learnings ≥ N distinct signers (Phase 5b)
     pool_sync_hours: float = 12.0         # background sync cadence
     pool_auto_contribute: bool = False    # if True, approved globals auto-open PRs; else stay in queue
 
@@ -65,6 +66,7 @@ _ENV = {
     "KOMI_POOL_MODE": "pool_mode",
     "KOMI_POOL_BRANCH": "pool_branch",
     "KOMI_POOL_REQUIRE_SIGNATURE": "pool_require_signature",
+    "KOMI_POOL_MIN_CORROBORATION": "pool_min_corroboration",
     "KOMI_POOL_SYNC_HOURS": "pool_sync_hours",
     "KOMI_POOL_AUTO_CONTRIBUTE": "pool_auto_contribute",
 }
@@ -86,6 +88,7 @@ def load() -> Config:
                 "pool_mode": pool.get("mode"),
                 "pool_branch": pool.get("branch"),
                 "pool_require_signature": pool.get("require_signature"),
+                "pool_min_corroboration": pool.get("min_corroboration"),
                 "pool_sync_hours": pool.get("sync_hours"),
                 "pool_auto_contribute": pool.get("auto_contribute"),
             }.items():

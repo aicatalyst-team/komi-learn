@@ -93,3 +93,26 @@ a second host to be a known surface, not copy-paste.
 ready. Give up: a little indirection now for a host (Claude Code) that's the only
 one today.
 **Reversibility.** Easy — additive.
+
+## ADR-9 — Corroboration is a transient count of distinct signers, never part of the id
+**Decision.** A pool learning carries a `signatures` array (one entry per distinct
+contributor who signed the *same* content). Its corroboration level = the number of
+*distinct, valid* signers, computed at pull time and attached to the in-memory
+`Learning` (`corroboration`) + the index column. It is **excluded** from
+`content_view()` / the content-addressed id. The legacy single-`signer` shape is
+treated as signature #1 (back-compatible); the array is authoritative when present.
+**Context.** "Verified" (valid signature) ≠ "good." Independent agreement is a real
+trust signal, and the content-addressed id already makes it *mechanically*
+detectable: two people who distill the same lesson produce the same file, and each
+signs a message binding their own pubkey (so signatures can't be replayed under
+another identity — ADR re: signing scheme). But the same lesson must hash
+*identically* regardless of how many have signed it — otherwise corroboration would
+fork the very files it's meant to merge.
+**Trade-off.** Gain: a trust gate (`pool.min_corroboration`) + a recall ranking
+nudge, with **zero new dependencies** and no id churn; old files and the live pool
+stay valid. Give up: the count is recomputed on every pull (cheap) rather than
+stored in the content; a signing-scheme change still invalidates signatures and
+needs a re-sign pass (`resign_seeds.py`) — corroboration doesn't change that.
+**Reversibility.** Easy — the array is additive; drop the bonus/gate and the system
+reverts to binary verified/not. The authoritative-array rule is what keeps the
+identity-swap defense intact (legacy-field tampering is ignored; parity-tested).

@@ -290,7 +290,8 @@ class Store:
                 confidence REAL, reused INTEGER DEFAULT 0,
                 last_used TEXT, state TEXT DEFAULT 'active',
                 source TEXT, origin_root TEXT, updated_at TEXT,
-                embedding BLOB, embed_version TEXT
+                embedding BLOB, embed_version TEXT,
+                corroboration INTEGER DEFAULT 1
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(
                 title, body, trigger, tags,
@@ -313,12 +314,14 @@ class Store:
             END;
             """
         )
-        # Migrate older index.db files that predate the embedding columns.
+        # Migrate older index.db files that predate newer columns.
         cols = {r[1] for r in db.execute("PRAGMA table_info(learnings)")}
         if "embedding" not in cols:
             db.execute("ALTER TABLE learnings ADD COLUMN embedding BLOB")
         if "embed_version" not in cols:
             db.execute("ALTER TABLE learnings ADD COLUMN embed_version TEXT")
+        if "corroboration" not in cols:
+            db.execute("ALTER TABLE learnings ADD COLUMN corroboration INTEGER DEFAULT 1")
         db.commit()
         return db
 
@@ -392,15 +395,16 @@ class Store:
             """
             INSERT INTO learnings (id, type, scope, category, title, body, trigger,
                                    tags, confidence, reused, last_used, state, source,
-                                   origin_root, updated_at)
+                                   origin_root, updated_at, corroboration)
             VALUES (:id,:type,:scope,:category,:title,:body,:trigger,:tags,
-                    :confidence,:reused,:last_used,:state,:source,:origin_root,:updated_at)
+                    :confidence,:reused,:last_used,:state,:source,:origin_root,:updated_at,
+                    :corroboration)
             ON CONFLICT(id) DO UPDATE SET
                 scope=excluded.scope, category=excluded.category, title=excluded.title,
                 body=excluded.body, trigger=excluded.trigger, tags=excluded.tags,
                 confidence=excluded.confidence, state=excluded.state,
                 source=excluded.source, origin_root=excluded.origin_root,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at, corroboration=excluded.corroboration
             """,
             {
                 "id": lng.id, "type": lng.type, "scope": lng.scope,
@@ -410,6 +414,7 @@ class Store:
                 "last_used": lng.usage.last_used, "state": lng.lifecycle.state,
                 "source": source, "origin_root": self._root_key,
                 "updated_at": lng.lifecycle.updated_at,
+                "corroboration": max(1, getattr(lng, "corroboration", 1) or 1),
             },
         )
         self._db.commit()

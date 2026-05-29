@@ -143,9 +143,12 @@ def _check_pool() -> Check:
         cache = paths.personal_root() / "pool" / "repo"
         if (cache / ".git").exists():
             pool = GitHubPool(PoolConfig(repo_url=cfg.pool_repo_url, cache_dir=str(cache),
-                                         require_signature=cfg.pool_require_signature))
+                                         require_signature=cfg.pool_require_signature,
+                                         min_corroboration=cfg.pool_min_corroboration))
             n = len(pool.pull())
-            return Check("pool", "pass", f"{n} learning(s) cached locally")
+            gate = (f" (min corroboration {cfg.pool_min_corroboration})"
+                    if cfg.pool_min_corroboration > 1 else "")
+            return Check("pool", "pass", f"{n} learning(s) cached locally{gate}")
         return Check("pool", "warn", "not synced yet",
                      "Syncs automatically on next session start, or run: komi-learn sync")
     except Exception as e:

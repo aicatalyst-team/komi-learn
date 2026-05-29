@@ -38,6 +38,7 @@ class PoolConfig:
     branch: str = "main"
     mode: str = "pr"                         # "pr" (open PRs) | "local" (commit directly; tests/local pools)
     require_signature: bool = True
+    min_corroboration: int = 1               # Phase 5b: only pull learnings ≥ N distinct valid signers
     author_name: str = "komi-learn"
     author_email: str = "komi-learn@users.noreply.github.com"
 
@@ -135,8 +136,14 @@ class GitHubPool:
 
         PR mode: create a branch, commit the file, push, and open a PR via ``gh``.
         Local mode: commit directly to the cache repo's branch (no remote/auth).
-        Idempotent by path: if the file already exists with identical content, this
-        is a no-op success (the content-addressed path means same lesson → same file)."""
+
+        Corroboration-aware (Phase 5b). The path is content-addressed, so the same
+        lesson always lands on the same file:
+          • file absent            → contribute it (signature #1)
+          • file present, NEW signer → APPEND this signature (corroboration ↑)
+          • file present, same signer → no-op success (already endorsed)
+        Appending preserves every prior signer — a second contributor strengthens a
+        learning's trust rather than overwriting it."""
         if not self.cache:
             return GitResult(False, "pool-not-configured")
         if self.cfg.repo_url and not valid_repo_url(self.cfg.repo_url):
@@ -152,31 +159,47 @@ class GitHubPool:
 
         rel = repo_path_for(envelope)
         target = self.cache / rel
-        body = render_md(envelope)
-
-        if target.exists() and target.read_text(encoding="utf-8") == body:
-            return GitResult(True, "already-present", {"path": rel, "noop": True})
-
         lid = envelope["learning"]["id"]
+
+        if target.exists():
+            existing = parse_md(target.read_text(encoding="utf-8", errors="replace"))
+            if existing is not None:
+                # Append the new signer to the existing file (corroboration). Returns
+                # None if this signer already endorses it → genuine no-op.
+                from .corroboration import envelope_signatures, merge_signature
+                incoming = envelope_signatures(envelope)
+                new_sig = incoming[0] if incoming else None
+                merged = merge_signature(existing, new_sig) if new_sig else None
+                if merged is None:
+                    return GitResult(True, "already-present", {"path": rel, "noop": True})
+                body = render_md(merged)
+                if self.cfg.mode == "local":
+                    return self._commit_local(rel, body, lid, action="corroborate")
+                return self._open_pr(rel, body, lid, action="corroborate")
+
+        body = render_md(envelope)
         if self.cfg.mode == "local":
             return self._commit_local(rel, body, lid)
         return self._open_pr(rel, body, lid)
 
-    def _commit_local(self, rel: str, body: str, lid: str) -> GitResult:
+    def _commit_local(self, rel: str, body: str, lid: str, *, action: str = "learn") -> GitResult:
         target = self.cache / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body, encoding="utf-8")
         _git(["-C", str(self.cache), "add", rel])
         r = _git(["-C", str(self.cache), "-c", f"user.name={self.cfg.author_name}",
                   "-c", f"user.email={self.cfg.author_email}",
-                  "commit", "-m", f"learn: {lid}"])
-        return GitResult(r.ok, r.detail, {"path": rel, "committed": r.ok})
+                  "commit", "-m", f"{action}: {lid}"])
+        return GitResult(r.ok, r.detail, {"path": rel, "committed": r.ok, "action": action})
 
-    def _open_pr(self, rel: str, body: str, lid: str) -> GitResult:
+    def _open_pr(self, rel: str, body: str, lid: str, *, action: str = "learn") -> GitResult:
         if not _have("gh"):
             return GitResult(False, "gh-not-installed",
                              {"hint": "install GitHub CLI or use mode=local"})
-        branch = f"learn/{lid.replace(':', '_')[:40]}"
+        # A corroboration reuses the same content id, so its branch must not collide
+        # with the original contribution's branch.
+        prefix = "corroborate" if action == "corroborate" else "learn"
+        branch = f"{prefix}/{lid.replace(':', '_')[:40]}"
         # fresh branch off the synced base
         _git(["-C", str(self.cache), "checkout", "-B", branch, f"origin/{self.cfg.branch}"])
         target = self.cache / rel
@@ -185,24 +208,31 @@ class GitHubPool:
         _git(["-C", str(self.cache), "add", rel])
         commit = _git(["-C", str(self.cache), "-c", f"user.name={self.cfg.author_name}",
                        "-c", f"user.email={self.cfg.author_email}",
-                       "commit", "-m", f"learn: {lid}"])
+                       "commit", "-m", f"{action}: {lid}"])
         if not commit.ok:
             return commit
         push = _git(["-C", str(self.cache), "push", "-u", "origin", branch])
         if not push.ok:
             return push
         title = envelope_title(body)
+        pr_title = (f"Corroborate learning: {title}" if action == "corroborate"
+                    else f"Add learning: {title}")
         pr = _gh(["pr", "create", "--repo", _repo_slug(self.cfg.repo_url),
                   "--base", self.cfg.branch, "--head", branch,
-                  "--title", f"Add learning: {title}",
-                  "--body", _pr_body(rel)], cwd=str(self.cache))
-        return GitResult(pr.ok, pr.detail, {"branch": branch, "path": rel, "pr_url": pr.detail})
+                  "--title", pr_title,
+                  "--body", _pr_body(rel, action=action)], cwd=str(self.cache))
+        return GitResult(pr.ok, pr.detail, {"branch": branch, "path": rel, "pr_url": pr.detail,
+                                            "action": action})
 
     # ── pull ───────────────────────────────────────────────────────────────
 
     def pull(self, *, categories: Optional[list[str]] = None,
              limit: Optional[int] = None) -> list[Learning]:
-        """Read + locally re-verify every learning in the synced mirror."""
+        """Read + locally re-verify every learning in the synced mirror.
+
+        Gates on ``cfg.min_corroboration`` (Phase 5b): a learning is skipped unless
+        at least that many DISTINCT contributors have a valid signature over it, and
+        the verified count is attached as ``Learning.corroboration`` for recall."""
         if not self.cache or not (self.cache / LEARNINGS_DIR).exists():
             return []
         out: list[Learning] = []
@@ -213,11 +243,14 @@ class GitHubPool:
             rep = ingest_verify(env, require_signature=self.cfg.require_signature)
             if not rep.accepted:
                 continue
+            if rep.corroboration < self.cfg.min_corroboration:
+                continue
             rec = env["learning"]
             if categories and rec.get("category") not in categories:
                 continue
             lng = Learning.from_dict({**rec, "scope": "global"})
             lng.provenance.origin = "pool"
+            lng.corroboration = max(1, rep.corroboration)
             out.append(lng)
             if limit and len(out) >= limit:
                 break
@@ -262,7 +295,17 @@ def envelope_title(md_body: str) -> str:
     return "new learning"
 
 
-def _pr_body(rel: str) -> str:
+def _pr_body(rel: str, *, action: str = "learn") -> str:
+    if action == "corroborate":
+        return (
+            f"Automated **corroboration** from komi-learn.\n\n"
+            f"- File: `{rel}`\n"
+            f"- This contributor independently distilled the same lesson and is "
+            f"adding their signature — strengthening the learning's corroboration, "
+            f"not changing its content (the content-addressed id is unchanged).\n"
+            f"- CI re-verifies the id, every signature, and re-runs the safety scrub.\n\n"
+            f"Approved locally by the contributor before submission."
+        )
     return (
         f"Automated contribution from komi-learn.\n\n"
         f"- File: `{rel}`\n"

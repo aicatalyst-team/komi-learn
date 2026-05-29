@@ -62,7 +62,8 @@ def pool_config() -> Optional[dict]:
         if not cfg.pool_enabled:
             return None
         return {"repo_url": cfg.pool_repo_url, "cache_dir": cfg.pool_cache_dir,
-                "branch": cfg.pool_branch, "require_signature": cfg.pool_require_signature}
+                "branch": cfg.pool_branch, "require_signature": cfg.pool_require_signature,
+                "min_corroboration": cfg.pool_min_corroboration}
     except Exception:
         return None
 

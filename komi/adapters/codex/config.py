@@ -22,6 +22,7 @@ class Config:
     pool_mode: str = "pr"
     pool_branch: str = "main"
     pool_require_signature: bool = True
+    pool_min_corroboration: int = 1
     pool_sync_hours: float = 12.0
     pool_auto_contribute: bool = False
 
@@ -49,6 +50,7 @@ def load() -> Config:
                 "pool_mode": pool.get("mode"),
                 "pool_branch": pool.get("branch"),
                 "pool_require_signature": pool.get("require_signature"),
+                "pool_min_corroboration": pool.get("min_corroboration"),
                 "pool_sync_hours": pool.get("sync_hours"),
                 "pool_auto_contribute": pool.get("auto_contribute"),
             }.items():
@@ -63,6 +65,7 @@ def load() -> Config:
         "KOMI_NUDGE_TURNS": "nudge_turns",
         "KOMI_POOL_REPO_URL": "pool_repo_url",
         "KOMI_POOL_REQUIRE_SIGNATURE": "pool_require_signature",
+        "KOMI_POOL_MIN_CORROBORATION": "pool_min_corroboration",
     }.items():
         if env_key in os.environ:
             v = os.environ[env_key]

@@ -20,7 +20,9 @@ Contributions are **automated and human-gated**. You never hand-author files her
 A PR must pass all of:
 - the `komi` envelope parses and has required fields;
 - the content-addressed **id matches** the content (no tampering);
-- the **signature verifies** against the embedded signer key;
+- **every signature verifies** against its own signer key — a learning may carry a
+  `signatures` array of independent endorsers, and *each* must verify (a claimed-but-
+  invalid signature is a hard failure), with at least one valid signer;
 - the **safety scrub** finds no secrets/PII/identifiers;
 - the file is at the correct content-addressed **path** (`learnings/<category>/<id>.md`).
 
@@ -45,5 +47,16 @@ kept personal.)
 ## Corroboration, not conflict
 
 Because file paths are content-addressed, two people who learn the same thing
-produce the **same file**. That's not a conflict — it's corroboration. A learning
-trusted by many independent signers is weighted higher when agents pull it.
+produce the **same file**. That's not a conflict — it's corroboration.
+
+When a second contributor independently distills a lesson that already exists,
+komi-learn **appends their signature** to that file's `signatures` array (it opens
+a "Corroborate learning: …" PR) rather than duplicating or overwriting it. Each
+signer signs a message binding their *own* public key, so the count of distinct
+valid signatures is a real measure of independent agreement — it can't be faked by
+replaying one signature.
+
+A learning endorsed by more independent signers is **weighted higher** when agents
+pull it, and consumers can require a minimum — `komi-learn config set
+pool.min_corroboration 2` pulls only lessons several people arrived at
+independently. (The default is 1 while the pool is young.)

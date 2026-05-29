@@ -24,8 +24,16 @@
 - ✅ **Semantic recall (done).** Meaning-based recall via a local embedding model
   (`komi-learn[smart]`), keyword fallback when absent. `engine/embed.py`,
   `vector_search`, semantic-first `_candidate_hits`. Verified with the real model.
-- 🔜 Corroboration-based trust: a learning signed by N independent contributors
-  ranks higher; low-trust isn't pulled by default. (No new deps — next.)
+- ✅ **Corroboration-based trust (done).** A pool learning carries a `signatures`
+  array — one per distinct contributor who independently signed the same
+  content-addressed lesson. `pull` counts *distinct valid* signers and gates on
+  `pool.min_corroboration`; recall adds a small log-dampened bonus so
+  well-corroborated community knowledge ranks higher (never overriding relevance).
+  Publishing an already-present learning by a new signer *appends* their signature
+  (corroboration ↑) instead of being a no-op. Legacy single-signer files stay valid
+  (no re-signing); the vendored CI verifier counts corroboration in lockstep
+  (parity-tested). No new dependencies. `pool/corroboration.py`, `engine/recall.py`,
+  `engine/store.py` (corroboration column), `tests/test_corroboration.py`.
 - 🔜 Embedding-based *clustering* in the curator (better umbrella detection).
 
 **Phase 6 — Second host adapter** *(proves "works for every agent")*
@@ -39,8 +47,8 @@
 - Flip both repos public.
 
 ## Known gaps / honest notes
-- Recall ranking is FTS + heuristics (no embeddings yet).
-- Trust is binary (verified / not) — no corroboration weighting yet.
-- Single host (Claude Code); "universal" is architected but unproven on a 2nd host.
-- The pool repo's vendored `verify.py` must stay in sync with the engine's verification logic (regression-tested).
-- Both repos private during testing.
+- Recall ranking is semantic (embeddings) when the model is installed, keyword FTS otherwise; both feed the same blend + a corroboration bonus.
+- Trust now has corroboration weighting (distinct-signer count), but the pool is young — `min_corroboration` defaults to 1 until enough lessons have independent signers to make a higher gate meaningful.
+- Two hosts proven (Claude Code + Codex) via the shared engine; broader persona validation (finance/student/scientist) still unproven end-to-end.
+- The pool repo's vendored `verify.py` must stay in sync with the engine's verification + corroboration logic (parity-tested in `tests/test_review_fixes.py` and `tests/test_corroboration.py`). After any signing-scheme change, re-run `pool-repo-template/.github/scripts/resign_seeds.py`.
+- Both repos private during testing (Phase 7 flips them public).

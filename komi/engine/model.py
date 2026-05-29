@@ -121,6 +121,13 @@ class Learning:
     usage: Usage = field(default_factory=Usage)
     lifecycle: Lifecycle = field(default_factory=Lifecycle)
 
+    # Transient trust signal for pool-sourced learnings: how many DISTINCT
+    # contributors independently signed this exact content (computed at pull time,
+    # see pool/corroboration.py). NOT part of content_view/the id — the same lesson
+    # must hash identically regardless of how many people have endorsed it. 1 for
+    # purely local learnings. Recall uses it as a small ranking nudge.
+    corroboration: int = 1
+
     # ---- content addressing -------------------------------------------------
 
     def content_view(self) -> dict[str, Any]:

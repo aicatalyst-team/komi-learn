@@ -78,6 +78,10 @@ def run_wizard(*, host: str, pool_url: Optional[str], api_key: Optional[str],
         # Joining gets you the knowledge + queues your general lessons for YOUR
         # review. Auto-publishing stays OFF - nothing is shared without approval.
         config_io.set_key(cfg, "pool.auto_contribute", False)
+        # Trust gate: pull every signed lesson for now (min 1 signer). Raise this
+        # later (`komi-learn config set pool.min_corroboration 2`) to only accept
+        # lessons several people independently arrived at, once the pool is dense.
+        config_io.set_key(cfg, "pool.min_corroboration", 1)
         pool_url = url
     else:
         config_io.set_key(cfg, "pool.repo_url", "")
