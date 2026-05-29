@@ -135,6 +135,36 @@ def cmd_sync(args) -> int:
     return 1
 
 
+def cmd_curate(args) -> int:
+    """Run the consolidation pass now (normally automatic ~weekly)."""
+    from komi.adapters.claude_code.curate import run_curate
+    mode = "preview (no changes)" if args.dry_run else "live"
+    _p(f"{PRODUCT}: curating — {mode}…\n")
+    rep = run_curate(dry_run=args.dry_run, use_llm=not args.no_llm)
+    _p(f"  {rep.summary()}")
+    if rep.consolidated:
+        for c in rep.consolidated:
+            _p(f"    • umbrella: {c['umbrella']}  (absorbed {len(c['absorbed'])})")
+    elif rep.clusters:
+        _p(f"    • {len(rep.clusters)} cluster(s) flagged "
+           + ("(merge needs a model — run without --no-llm)" if args.no_llm else ""))
+    if rep.pruned:
+        _p(f"    • archived {len(rep.pruned)} stale learning(s) (recoverable)")
+    report = paths_report()
+    if report:
+        _p(f"\n  full report: {report}")
+    return 0
+
+
+def paths_report():
+    try:
+        from komi.adapters.claude_code import paths
+        p = paths.personal_root() / "CURATION_REPORT.md"
+        return p if p.exists() else None
+    except Exception:
+        return None
+
+
 def cmd_login(args) -> int:
     """Convenience: log in for free OAuth distillation via the claude CLI."""
     import shutil
@@ -197,6 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pl = sub.add_parser("login", help="log in for free OAuth distillation (claude CLI)")
     pl.set_defaults(func=cmd_login)
+
+    pc = sub.add_parser("curate", help="consolidate the learning library now (normally ~weekly)")
+    pc.add_argument("--dry-run", action="store_true", help="preview changes without applying")
+    pc.add_argument("--no-llm", action="store_true", help="prune only; don't merge clusters")
+    pc.set_defaults(func=cmd_curate)
 
     pu = sub.add_parser("uninstall", help="remove komi-learn hooks (keeps data)")
     pu.add_argument("--purge", action="store_true", help="also delete ~/.claude/komi")

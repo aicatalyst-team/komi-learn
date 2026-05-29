@@ -194,4 +194,58 @@ def _load_komi_env() -> None:
         pass
 
 
-__all__ = ["AnthropicLLM", "NullLLM", "build_llm"]
+# ── curator consolidator ────────────────────────────────────────────────────
+
+_CONSOLIDATE_SYSTEM = """You are komi-learn's skill CURATOR. You are given a CLUSTER of
+related procedural learnings (skills) that overlap. Merge them into ONE rich,
+CLASS-LEVEL "umbrella" skill that covers the whole cluster.
+
+Return ONLY a JSON object:
+{
+  "title": "<class-level name — covers the whole class, NOT one specific task>",
+  "body": "<the merged guidance: combine the techniques, keep every distinct
+            pitfall/step, deduplicate. Write it as durable reference data.>",
+  "trigger": "<'use when…' — the situation this umbrella applies to>",
+  "tags": ["<lowercase>", "<keywords>"],
+  "category": "<keep the shared category>",
+  "rationale": "<one clause>"
+}
+
+Rules:
+- The title MUST be at the class level (e.g. "Working with pytest"), never a single
+  task/PR/error.
+- Preserve substance: do not drop a member's specific fix or pitfall when merging.
+- If the cluster does NOT actually share a class (they're unrelated), return {} and
+  they'll be left alone."""
+
+
+def build_consolidator(llm=None):
+    """Return a ConsolidateLLM callable for the curator, backed by ``llm`` (or a
+    freshly chosen backend). Returns None when no model is available — the curator
+    then reports clusters without merging (safe degradation)."""
+    client = llm if llm is not None else build_llm()
+    if isinstance(client, NullLLM):
+        return None
+
+    def _consolidate(members):
+        payload = json.dumps([
+            {"title": m.title, "body": m.body, "trigger": m.trigger,
+             "tags": m.tags, "category": m.category}
+            for m in members
+        ], ensure_ascii=False)
+        text = client.complete(system=_CONSOLIDATE_SYSTEM, user=payload)
+        if not text:
+            return None
+        s, e = text.find("{"), text.rfind("}")
+        if s == -1 or e == -1 or e <= s:
+            return None
+        try:
+            obj = json.loads(text[s:e + 1])
+            return obj or None
+        except json.JSONDecodeError:
+            return None
+
+    return _consolidate
+
+
+__all__ = ["AnthropicLLM", "NullLLM", "build_llm", "build_consolidator"]

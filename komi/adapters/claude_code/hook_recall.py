@@ -23,8 +23,14 @@ def main() -> int:
     payload = _read_stdin_json()
     cwd = payload.get("cwd", "") or ""
 
-    # Kick off a background pool sync if due (detached; never blocks this hook).
+    # Kick off background maintenance if due (detached; never blocks this hook):
+    # pool sync (~12h cadence) and the slow curator (~7d cadence).
     _maybe_sync_pool()
+    try:
+        from .curate import maybe_curate_in_background
+        maybe_curate_in_background()
+    except Exception:
+        pass
 
     try:
         store = _merged_store(cwd)

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -117,9 +118,8 @@ class Store:
         if not learning.id:
             learning.finalize()
         if learning.type not in _FILE_FOR_TYPE:
-            # procedural → skills, handled elsewhere; index it but don't write MD here
-            self._index_one(learning, source="skill")
-            return learning.id
+            # procedural learnings are persisted as skills/<slug>/SKILL.md
+            return self._upsert_skill(learning)
 
         path = self._md_path(learning.type)
         entries = self._read_entries(path)
@@ -146,6 +146,70 @@ class Store:
         out: list[Learning] = []
         for t in _FILE_FOR_TYPE:
             out.extend(Learning.from_dict(e) for e in self._read_entries(self._md_path(t)))
+        out.extend(self._read_skills())
+        return out
+
+    # ── skills/ persistence (procedural learnings) ──────────────────────
+
+    def _skills_dir(self) -> Path:
+        return self.root / "skills"
+
+    def _skill_slug(self, learning: Learning) -> str:
+        base = re.sub(r"[^a-z0-9]+", "-", (learning.title or "skill").lower()).strip("-")[:48]
+        return base or "skill"
+
+    def _upsert_skill(self, learning: Learning) -> str:
+        """Persist a procedural learning as ``skills/<slug>/SKILL.md``.
+
+        The directory is named after the id so two distinct learnings never collide
+        on a slug; the human-friendly slug is part of the path for readability. The
+        file carries agentskills.io-style frontmatter plus the verifiable JSON block,
+        so it's a real skill on disk AND losslessly round-trippable."""
+        existing = {l.id: l for l in self._read_skills()}
+        if learning.id in existing:
+            # corroboration: same content seen again
+            prior = existing[learning.id]
+            learning.confidence = min(1.0, max(prior.confidence, learning.confidence) + 0.1)
+            learning.usage = prior.usage
+            learning.lifecycle.created_at = prior.lifecycle.created_at or learning.lifecycle.created_at
+        slug = self._skill_slug(learning)
+        short = learning.id.split(":", 1)[-1][:12]
+        d = self._skills_dir() / f"{slug}-{short}"
+        d.mkdir(parents=True, exist_ok=True)
+        self._atomic_write(d / "SKILL.md", self._render_skill(learning))
+        self._index_one(learning, source="skill")
+        return learning.id
+
+    def _render_skill(self, lng: Learning) -> str:
+        fm = {
+            "name": self._skill_slug(lng),
+            "description": (lng.title + (". " + lng.trigger if lng.trigger else "")).strip(),
+            "komi_id": lng.id,
+            "scope": lng.scope,
+            "tags": list(lng.tags),
+        }
+        import json as _json
+        front = "\n".join(f"{k}: {_json.dumps(v) if isinstance(v, (list, dict)) else v}"
+                          for k, v in fm.items())
+        payload = _json.dumps(lng.to_dict(), ensure_ascii=False, indent=2)
+        return (
+            f"---\n{front}\n---\n\n"
+            f"# {lng.title}\n\n"
+            f"{lng.body}\n\n"
+            + (f"**Use when:** {lng.trigger}\n\n" if lng.trigger else "")
+            + f"<!-- komi record (verifiable; do not hand-edit) -->\n"
+            f"```komi\n{payload}\n```\n"
+        )
+
+    def _read_skills(self) -> list[Learning]:
+        d = self._skills_dir()
+        if not d.exists():
+            return []
+        out: list[Learning] = []
+        for skill_md in d.glob("*/SKILL.md"):
+            rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
+            if rec is not None:
+                out.append(Learning.from_dict(rec))
         return out
 
     def get(self, learning_id: str) -> Optional[Learning]:
@@ -167,6 +231,17 @@ class Store:
             if changed:
                 text = ENTRY_DELIMITER.join(self._render_entry(e) for e in entries) + "\n"
                 self._atomic_write(path, text)
+                self._db.execute("UPDATE learnings SET state='archived' WHERE id=?",
+                                 (learning_id,))
+                self._db.commit()
+                return True
+        # skills: flip state in the SKILL.md record (file kept — archived, not deleted)
+        for skill_md in self._skills_dir().glob("*/SKILL.md"):
+            rec = _extract_json_block(skill_md.read_text(encoding="utf-8", errors="replace"))
+            if rec and rec.get("id") == learning_id:
+                lng = Learning.from_dict(rec)
+                lng.lifecycle.state = "archived"
+                self._atomic_write(skill_md, self._render_skill(lng))
                 self._db.execute("UPDATE learnings SET state='archived' WHERE id=?",
                                  (learning_id,))
                 self._db.commit()

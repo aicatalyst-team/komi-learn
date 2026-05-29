@@ -95,6 +95,7 @@ class Lifecycle:
     created_at: str = ""
     updated_at: str = ""
     state: str = "active"               # active | archived
+    pinned: bool = False                # if True, the curator never archives/consolidates it
 
 
 # ── The Learning ─────────────────────────────────────────────────────────

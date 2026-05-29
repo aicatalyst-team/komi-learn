@@ -140,6 +140,7 @@ Manage it:
 komi-learn doctor      # diagnose: what's healthy, what's an optional warning, how to fix
 komi-learn status      # config + how many learnings you've accrued
 komi-learn sync        # pull the latest global learnings now
+komi-learn curate      # consolidate the library now (otherwise automatic, ~weekly)
 komi-learn uninstall   # remove hooks (keeps your learnings; --purge to wipe)
 ```
 
