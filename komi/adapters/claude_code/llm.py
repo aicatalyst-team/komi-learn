@@ -120,41 +120,45 @@ Rules:
 - Be conservative: a wrong "global" leaks specifics into a public pool. Default "project"."""
 
 
-def build_llm(*, prefer: str = "api"):
+def build_llm(*, prefer: str = "oauth"):
     """Pick a backend for the distiller/judge.
 
-    Default preference is the **Anthropic API key** because it works reliably from
-    a detached hook subprocess (unlike OAuth, which can be unavailable in nested or
-    restricted contexts). The key is read from the environment or komi-learn's own
-    ``~/.claude/komi/.env`` (loaded by :func:`_load_komi_env`). If no key is set we
-    fall back to the ``claude`` CLI (OAuth subscription), then a safe no-op so
-    distillation simply turns off without ever breaking the session.
+    Default ordering (``prefer="oauth"``): **OAuth via the claude CLI first** —
+    it's free (rides the user's Claude.ai subscription) and needs no key — but
+    *only when a cheap auth probe confirms it's logged in*. We gate on the probe
+    (``claude auth status``, no model call) rather than just the binary's presence,
+    so we never select a CLI that will fail at distill time. If OAuth isn't
+    available we fall back to an **Anthropic API key** (from env or komi-learn's
+    ``~/.claude/komi/.env``), then a safe **no-op** so distillation simply turns
+    off — never breaking the session.
+
+    ``prefer="api"`` reverses the first two (API key first) for users who'd rather
+    not use subscription OAuth for automated distillation.
 
     The chosen client implements both ``LLMClient`` and ``ScopeJudge``.
     """
     _load_komi_env()
-    if prefer == "api":
-        a = AnthropicLLM()
-        if a.available:
-            return a
+
+    def _oauth():
         try:
             from .llm_cli import ClaudeCLILLM
             cli = ClaudeCLILLM()
-            if cli.available:
+            if cli.available and cli.probe().ok:
                 return cli
         except Exception:
             pass
-        return NullLLM()
-    # prefer == "cli": OAuth-first ordering
-    try:
-        from .llm_cli import ClaudeCLILLM
-        cli = ClaudeCLILLM()
-        if cli.available:
-            return cli
-    except Exception:
-        pass
-    a = AnthropicLLM()
-    return a if a.available else NullLLM()
+        return None
+
+    def _api():
+        a = AnthropicLLM()
+        return a if a.available else None
+
+    order = (_oauth, _api) if prefer == "oauth" else (_api, _oauth)
+    for pick in order:
+        client = pick()
+        if client is not None:
+            return client
+    return NullLLM()
 
 
 def _load_komi_env() -> None:

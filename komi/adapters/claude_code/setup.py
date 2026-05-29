@@ -204,8 +204,8 @@ def _setup_model_credential(api_key: Optional[str]) -> StepResult:
     key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
     env_path = paths.personal_root() / ".env"
     try:
+        # An explicitly-passed key always wins (user opted into API-key distillation).
         if key:
-            # write/refresh ANTHROPIC_API_KEY in komi's .env (0600 where possible)
             lines = []
             if env_path.exists():
                 lines = [ln for ln in env_path.read_text(encoding="utf-8").splitlines()
@@ -217,14 +217,26 @@ def _setup_model_credential(api_key: Optional[str]) -> StepResult:
             except Exception:
                 pass
             return StepResult("model", True, "API key stored for distillation")
-        # No key — check if the claude CLI is at least present as a fallback
-        if shutil.which("claude"):
-            return StepResult("model", True,
-                              "no API key; will try the claude CLI (OAuth) for distillation",
-                              fix="For reliable distillation set ANTHROPIC_API_KEY or run: komi-learn install --api-key sk-...")
+
+        # No key — prefer free OAuth via the claude CLI. Probe to confirm login.
+        try:
+            from .llm_cli import ClaudeCLILLM
+            cli = ClaudeCLILLM()
+            if cli.available:
+                pr = cli.probe()
+                if pr.ok:
+                    return StepResult("model", True,
+                                      f"distillation via {pr.summary()} — no API key needed")
+                return StepResult("model", True,
+                                  "claude CLI found but not logged in — distillation OFF until you log in",
+                                  fix="Free OAuth distillation:  claude auth login   "
+                                      "(or:  komi-learn install --api-key sk-...)")
+        except Exception:
+            pass
+
         return StepResult("model", True,
-                          "no model credential found — recall works; distillation is OFF",
-                          fix="Enable distillation: komi-learn install --api-key sk-...")
+                          "no model credential — recall works; distillation is OFF",
+                          fix="Log in:  claude auth login   or:  komi-learn install --api-key sk-...")
     except Exception as e:
         return StepResult("model", False, str(e))
 

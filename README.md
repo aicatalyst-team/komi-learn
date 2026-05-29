@@ -98,11 +98,16 @@ That single `komi-learn install`:
 - enables distillation if a model credential is available, and
 - **recall starts working in your very next session — no commands, no config.**
 
-Optional flags:
+**Distillation auth — zero-config when possible.** komi-learn prefers **free OAuth
+via your existing Claude.ai login** (the `claude` CLI) — no API key, no per-call
+cost. It confirms you're logged in with a cheap, cost-free `claude auth status`
+check before using it. If you're not logged in, it falls back to an API key, and
+if neither is available, distillation simply stays off (recall still works).
 
 ```bash
+komi-learn login                                                       # free OAuth distillation (claude auth login)
 komi-learn install --pool https://github.com/kurikomi-labs/komi-pool   # join the global pool
-komi-learn install --api-key sk-ant-...                                # enable autonomous distillation
+komi-learn install --api-key sk-ant-...                                # use an API key instead of OAuth
 ```
 
 Manage it:

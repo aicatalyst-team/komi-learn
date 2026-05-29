@@ -113,6 +113,27 @@ def cmd_sync(args) -> int:
     return 1
 
 
+def cmd_login(args) -> int:
+    """Convenience: log in for free OAuth distillation via the claude CLI."""
+    import shutil
+    import subprocess
+    if not shutil.which("claude"):
+        _p(f"{PRODUCT}: the `claude` CLI isn't installed, so OAuth login isn't available here.")
+        _p("Install Claude Code, or enable distillation with an API key:")
+        _p("  komi-learn install --api-key sk-ant-...")
+        return 1
+    _p(f"{PRODUCT}: launching `claude auth login` (uses your Claude.ai subscription)…\n")
+    try:
+        rc = subprocess.call(["claude", "auth", "login"])
+    except Exception as e:
+        _p(f"{PRODUCT}: could not launch login — {e}")
+        return 1
+    if rc == 0:
+        _p(f"\n{PRODUCT}: logged in. Distillation will use OAuth (no API key, no per-call cost).")
+        _p("Verify with:  komi-learn doctor")
+    return rc
+
+
 def cmd_uninstall(args) -> int:
     from komi.adapters.claude_code import setup
     rep = setup.uninstall(keep_data=not args.purge)
@@ -149,6 +170,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     py = sub.add_parser("sync", help="sync the global pool now")
     py.set_defaults(func=cmd_sync)
+
+    pl = sub.add_parser("login", help="log in for free OAuth distillation (claude CLI)")
+    pl.set_defaults(func=cmd_login)
 
     pu = sub.add_parser("uninstall", help="remove komi-learn hooks (keeps data)")
     pu.add_argument("--purge", action="store_true", help="also delete ~/.claude/komi")

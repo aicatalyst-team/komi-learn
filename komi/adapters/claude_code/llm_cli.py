@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from typing import Optional
 
 from ...engine.model import Learning, Scope
@@ -30,6 +31,26 @@ _AUTH_FAIL_MARKERS = (
     "authentication",
     "Unauthorized",
 )
+
+
+@dataclass
+class AuthProbe:
+    """Result of the cheap ``claude auth status`` health check (no model call)."""
+    ok: bool                  # True = logged in; OAuth distillation expected to work
+    reason: str               # logged-in | not-logged-in | claude-cli-not-found | auth-status-failed
+    method: str = ""          # e.g. "claude.ai"
+    subscription: str = ""    # e.g. "max", "pro"
+    email: str = ""
+
+    def summary(self) -> str:
+        if self.ok:
+            sub = f" ({self.subscription})" if self.subscription else ""
+            return f"OAuth via {self.method or 'claude CLI'}{sub}"
+        return {
+            "not-logged-in": "claude CLI present but not logged in",
+            "claude-cli-not-found": "claude CLI not installed",
+            "auth-status-failed": "claude CLI auth check failed",
+        }.get(self.reason, self.reason)
 
 
 class ClaudeCLILLM:
@@ -48,10 +69,47 @@ class ClaudeCLILLM:
         self.timeout = timeout
         self.claude_bin = claude_bin or shutil.which("claude") or "claude"
         self._healthy = shutil.which(self.claude_bin) is not None or os.path.exists(self.claude_bin)
+        self._probe_cache: Optional[AuthProbe] = None
 
     @property
     def available(self) -> bool:
+        """True if the CLI binary exists. Use :meth:`probe` to confirm OAuth works."""
         return self._healthy
+
+    def probe(self, *, force: bool = False) -> "AuthProbe":
+        """Cheap, cost-free auth health check via ``claude auth status --json``.
+
+        This makes NO model call (no tokens, no rate-limit hit) — it just asks the
+        CLI whether it's logged in. Result is cached per-process so the hook only
+        probes once. Returns an :class:`AuthProbe` describing whether distillation
+        via OAuth is expected to work and why.
+        """
+        if self._probe_cache is not None and not force:
+            return self._probe_cache
+        if not self._healthy:
+            self._probe_cache = AuthProbe(ok=False, reason="claude-cli-not-found",
+                                          method="", subscription="")
+            return self._probe_cache
+        try:
+            proc = subprocess.run(
+                [self.claude_bin, "auth", "status", "--json"],
+                capture_output=True, text=True, timeout=20, env=_clean_env(),
+            )
+            data = json.loads((proc.stdout or "{}").strip() or "{}")
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError,
+                json.JSONDecodeError):
+            self._probe_cache = AuthProbe(ok=False, reason="auth-status-failed",
+                                          method="", subscription="")
+            return self._probe_cache
+        logged_in = bool(data.get("loggedIn"))
+        self._probe_cache = AuthProbe(
+            ok=logged_in,
+            reason="logged-in" if logged_in else "not-logged-in",
+            method=data.get("authMethod", ""),
+            subscription=data.get("subscriptionType", ""),
+            email=data.get("email", ""),
+        )
+        return self._probe_cache
 
     def _run(self, *, system: str, user: str, max_tokens_hint: int = 2000) -> str:
         """One headless call. Returns model text, or "" on any failure."""
@@ -110,18 +168,27 @@ class ClaudeCLILLM:
 
 
 def _clean_env() -> dict:
-    """Environment for the CLI subprocess. We strip hook-injected CLAUDE_CODE_*
-    vars that could make the nested CLI think it's inside a hook, but keep PATH,
-    HOME, and auth/credential locations so OAuth/keychain still resolve."""
-    keep_prefixes = ("PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
-                     "SystemRoot", "TEMP", "TMP", "ANTHROPIC_API_KEY",
-                     "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR")
-    env = {}
-    for k, v in os.environ.items():
-        if k.startswith(keep_prefixes):
-            env[k] = v
-    # Explicitly DROP CLAUDE_CODE_* / CLAUDECODE so the nested CLI runs clean.
-    return env
+    """Environment for the nested ``claude`` CLI subprocess.
+
+    Strategy: copy the FULL environment, then DROP only the specific Claude-Code
+    runtime vars that would make the nested CLI think it's running inside a hook
+    (which changes its behavior). An earlier version used an allowlist and
+    accidentally stripped Windows credential-locating vars (USERNAME, USERDOMAIN,
+    ALLUSERSPROFILE, …), which broke OAuth credential resolution — ``auth status``
+    reported not-logged-in purely because of the missing env. Keeping the full env
+    minus the known-bad keys preserves auth while still de-nesting the CLI.
+    """
+    drop_exact = {
+        "CLAUDECODE",
+        "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_TMPDIR", "CLAUDE_CODE_DISABLE_CRON",
+        "CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES",
+        "CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL",
+        "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+        "CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH", "CLAUDE_AGENT_SDK_VERSION",
+        "CLAUDE_EFFORT",
+    }
+    return {k: v for k, v in os.environ.items() if k not in drop_exact}
 
 
 _JUDGE_SYSTEM = """You decide the SCOPE of a distilled learning for a shared knowledge system.
@@ -145,4 +212,4 @@ Rules:
 - Be conservative: a wrong "global" leaks specifics into a public pool. Default "project"."""
 
 
-__all__ = ["ClaudeCLILLM"]
+__all__ = ["ClaudeCLILLM", "AuthProbe"]
