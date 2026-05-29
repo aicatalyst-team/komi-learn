@@ -27,7 +27,7 @@ full = ["blake3>=0.4", "pynacl>=1.5", "anthropic>=0.40"]
 dev = ["pytest>=8"]
 
 [project.scripts]
-komi-recall = "komi.adapters.claude_code.hook_recall:main"
+komi-learn = "komi.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["komi*"]

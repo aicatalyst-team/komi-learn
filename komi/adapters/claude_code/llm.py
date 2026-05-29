@@ -120,15 +120,23 @@ Rules:
 - Be conservative: a wrong "global" leaks specifics into a public pool. Default "project"."""
 
 
-def build_llm(*, prefer: str = "cli"):
+def build_llm(*, prefer: str = "api"):
     """Pick a backend for the distiller/judge.
 
-    Default preference is the ``claude`` CLI (uses the user's OAuth subscription —
-    no extra cost, no API key needed), then the Anthropic API (if a key is set),
-    then a safe no-op. The chosen client implements both ``LLMClient`` and
-    ``ScopeJudge`` so it can drive distillation and scope classification.
+    Default preference is the **Anthropic API key** because it works reliably from
+    a detached hook subprocess (unlike OAuth, which can be unavailable in nested or
+    restricted contexts). The key is read from the environment or komi-learn's own
+    ``~/.claude/komi/.env`` (loaded by :func:`_load_komi_env`). If no key is set we
+    fall back to the ``claude`` CLI (OAuth subscription), then a safe no-op so
+    distillation simply turns off without ever breaking the session.
+
+    The chosen client implements both ``LLMClient`` and ``ScopeJudge``.
     """
-    if prefer == "cli":
+    _load_komi_env()
+    if prefer == "api":
+        a = AnthropicLLM()
+        if a.available:
+            return a
         try:
             from .llm_cli import ClaudeCLILLM
             cli = ClaudeCLILLM()
@@ -136,10 +144,36 @@ def build_llm(*, prefer: str = "cli"):
                 return cli
         except Exception:
             pass
+        return NullLLM()
+    # prefer == "cli": OAuth-first ordering
+    try:
+        from .llm_cli import ClaudeCLILLM
+        cli = ClaudeCLILLM()
+        if cli.available:
+            return cli
+    except Exception:
+        pass
     a = AnthropicLLM()
-    if a.available:
-        return a
-    return NullLLM()
+    return a if a.available else NullLLM()
+
+
+def _load_komi_env() -> None:
+    """Load ANTHROPIC_API_KEY (and any other vars) from ~/.claude/komi/.env into
+    the process env if not already set. This is how a hook-spawned distiller gets
+    the credential the installer stored, without depending on shell env inheritance."""
+    try:
+        from . import paths
+        env_path = paths.personal_root() / ".env"
+        if not env_path.exists():
+            return
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+    except Exception:
+        pass
 
 
 __all__ = ["AnthropicLLM", "NullLLM", "build_llm"]

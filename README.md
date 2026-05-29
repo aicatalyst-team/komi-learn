@@ -78,26 +78,53 @@ Run the tests:
 
 ```bash
 pip install pytest
-python -m pytest tests/ -q        # 29 passing
+python -m pytest tests/ -q        # 50 passing
 ```
 
 ---
 
-## Install as a Claude Code plugin
+## Install for Claude Code (one command)
 
-The plugin ships hooks that auto-register (`SessionStart` → recall,
-`Stop`/`SubagentStop` → distill). With `ANTHROPIC_API_KEY` set, distillation and
-classification use a real model (a cheap one by default — distillation is a
-summarization task); without it, the hooks degrade to safe no-ops.
+```bash
+pip install komi-learn        # (today: pip install -e . from this repo)
+komi-learn install            # set up everything, automatically
+```
 
+That single `komi-learn install`:
+- detects your Python and registers the hooks in `~/.claude/settings.json`
+  (backed up first, merged not clobbered, using an absolute interpreter path so
+  it can't break on a PATH mismatch),
+- writes config and generates your pseudonymous contributor key,
+- enables distillation if a model credential is available, and
+- **recall starts working in your very next session — no commands, no config.**
+
+Optional flags:
+
+```bash
+komi-learn install --pool https://github.com/kurikomi-labs/komi-pool   # join the global pool
+komi-learn install --api-key sk-ant-...                                # enable autonomous distillation
 ```
-.claude-plugin/plugin.json     # manifest
-hooks/hooks.json               # auto-registered hooks
-komi/                          # the engine + adapter (Python)
+
+Manage it:
+
+```bash
+komi-learn doctor      # diagnose: what's healthy, what's an optional warning, how to fix
+komi-learn status      # config + how many learnings you've accrued
+komi-learn sync        # pull the latest global learnings now
+komi-learn uninstall   # remove hooks (keeps your learnings; --purge to wipe)
 ```
+
+**Reliability model:** *recall always works* — it needs no model and no auth, so
+every user gets value immediately. *Distillation is best-effort* — it uses your
+model credential when available and silently turns off otherwise. komi-learn
+never breaks your agent, even when one of its own optional pieces can't run.
 
 Personal learnings live under `~/.claude/komi/`; project learnings under
 `<project>/.claude/komi/` (committable, team-shareable). They share one index.
+
+> A Claude Code **plugin** form also ships (`.claude-plugin/plugin.json` +
+> `hooks/hooks.json`) for marketplace-style distribution; the `komi-learn install`
+> command above is the recommended path today.
 
 **Optional power-ups** (zero code change — the engine detects them):
 

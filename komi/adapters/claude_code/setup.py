@@ -1,0 +1,306 @@
+"""komi-learn — automated install/uninstall/doctor for the Claude Code host.
+
+These functions back the ``komi-learn`` CLI. The design goal is **one command,
+no config suffering, and never break the user's agent**:
+
+- Recall needs no model and no auth → it ALWAYS works once hooks are installed.
+- Distill is best-effort → it uses a model credential if one is available and
+  silently no-ops otherwise. The install never fails just because a model isn't
+  reachable.
+
+Everything here is idempotent and reversible: settings.json is backed up before
+editing and merged (never clobbered), and ``uninstall`` removes only komi-learn's
+own hook entries.
+
+User-facing strings always say "komi-learn" (the Kurikomi product), never "komi".
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+from . import paths
+
+HOOK_EVENTS = ("SessionStart", "Stop", "SubagentStop")
+_HOOK_MODULES = {
+    "SessionStart": "komi.adapters.claude_code.hook_recall",
+    "Stop": "komi.adapters.claude_code.hook_distill",
+    "SubagentStop": "komi.adapters.claude_code.hook_distill",
+}
+_HOOK_MARKER = "komi.adapters.claude_code"
+
+
+@dataclass
+class StepResult:
+    name: str
+    ok: bool
+    detail: str = ""
+    fix: str = ""
+
+
+@dataclass
+class InstallReport:
+    steps: list[StepResult] = field(default_factory=list)
+
+    def add(self, name, ok, detail="", fix=""):
+        self.steps.append(StepResult(name, ok, detail, fix))
+
+    @property
+    def ok(self) -> bool:
+        # Install "succeeds" if the always-works core (hooks + config) is in place.
+        core = {"hooks", "config", "import"}
+        return all(s.ok for s in self.steps if s.name in core)
+
+
+# ── helpers ────────────────────────────────────────────────────────────────
+
+def _python_cmd() -> str:
+    """Absolute path to THIS interpreter, quoted if it has spaces.
+
+    Using the absolute path (not bare ``python``) makes hooks robust against PATH
+    differences between the install shell and Claude Code's hook runtime — the
+    single most common cause of "works for me, not for them"."""
+    exe = sys.executable or "python"
+    return f'"{exe}"' if " " in exe else exe
+
+
+def _hook_command(module: str) -> str:
+    return f"{_python_cmd()} -m {module}"
+
+
+def settings_path() -> Path:
+    return paths.claude_home() / "settings.json"
+
+
+# ── install ────────────────────────────────────────────────────────────────
+
+def install(*, pool_repo_url: Optional[str] = None,
+            api_key: Optional[str] = None,
+            nudge_turns: int = 8) -> InstallReport:
+    """Full automated setup. Returns a report; never raises for expected issues."""
+    rep = InstallReport()
+
+    # 1. import check — confirm komi-learn is importable by THIS interpreter
+    try:
+        import komi  # noqa: F401
+        rep.add("import", True, f"komi-learn importable ({sys.executable})")
+    except Exception as e:
+        rep.add("import", False, str(e),
+                fix="Reinstall: pip install komi-learn  (or pip install -e . from the repo)")
+        return rep  # nothing else will work
+
+    # 2. ensure dirs
+    try:
+        paths.personal_root().mkdir(parents=True, exist_ok=True)
+        rep.add("dirs", True, str(paths.personal_root()))
+    except Exception as e:
+        rep.add("dirs", False, str(e))
+
+    # 3. hooks — merge into settings.json (backup + idempotent)
+    rep.steps.append(_install_hooks())
+
+    # 4. config — write/merge, set pool repo if given
+    rep.steps.append(_write_config(pool_repo_url=pool_repo_url, nudge_turns=nudge_turns))
+
+    # 5. contributor key — generate the pseudonymous signing identity
+    try:
+        from ...pool.identity import Contributor
+        c = Contributor(paths.keys_dir())
+        rep.add("key", True, f"contributor identity ({c.algo})")
+    except Exception as e:
+        rep.add("key", False, str(e),
+                fix="Optional: needed only to contribute to the pool. pip install pynacl")
+
+    # 6. model credential (best-effort; distill degrades without it)
+    rep.steps.append(_setup_model_credential(api_key))
+
+    # 7. initial pool sync (best-effort)
+    if pool_repo_url or _config_has_pool():
+        rep.steps.append(_initial_sync())
+
+    return rep
+
+
+def _install_hooks() -> StepResult:
+    sp = settings_path()
+    try:
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if sp.exists():
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            # back up once per install
+            bak = sp.with_suffix(".json.komi-bak")
+            shutil.copy2(sp, bak)
+        hooks = data.setdefault("hooks", {})
+        added, refreshed = [], []
+        for event in HOOK_EVENTS:
+            arr = hooks.setdefault(event, [])
+            want = _hook_command(_HOOK_MODULES[event])
+            # find an existing komi hook for this event
+            existing = None
+            for entry in arr:
+                for h in entry.get("hooks", []):
+                    if _HOOK_MARKER in h.get("command", ""):
+                        existing = h
+                        break
+                if existing:
+                    break
+            if existing is None:
+                arr.append({"hooks": [{"type": "command", "command": want}]})
+                added.append(event)
+            elif existing.get("command") != want:
+                # self-heal: a stale command (e.g. bare 'python', or an old repo
+                # path) gets upgraded to the canonical absolute-interpreter form.
+                existing["command"] = want
+                refreshed.append(event)
+        sp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        detail = f"hooks set for {', '.join(HOOK_EVENTS)}"
+        bits = []
+        if added:
+            bits.append(f"added: {', '.join(added)}")
+        if refreshed:
+            bits.append(f"refreshed: {', '.join(refreshed)}")
+        detail += f" ({'; '.join(bits)})" if bits else " (already current)"
+        return StepResult("hooks", True, detail)
+    except Exception as e:
+        return StepResult("hooks", False, str(e),
+                          fix=f"Manually add a SessionStart hook running: {_hook_command(_HOOK_MODULES['SessionStart'])}")
+
+
+def _write_config(*, pool_repo_url: Optional[str], nudge_turns: int) -> StepResult:
+    try:
+        cpath = paths.personal_root() / "config.json"
+        cfg = {}
+        if cpath.exists():
+            cfg = json.loads(cpath.read_text(encoding="utf-8"))
+        cfg.setdefault("nudge_turns", nudge_turns)
+        cfg.setdefault("recall_k", 8)
+        pool = cfg.setdefault("pool", {})
+        if pool_repo_url:
+            pool["repo_url"] = pool_repo_url
+        pool.setdefault("repo_url", pool.get("repo_url", ""))
+        pool.setdefault("mode", "pr")
+        pool.setdefault("branch", "main")
+        pool.setdefault("require_signature", True)
+        pool.setdefault("sync_hours", 12)
+        pool.setdefault("auto_contribute", False)
+        cpath.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        pr = pool.get("repo_url") or "(not set — personal-only until configured)"
+        return StepResult("config", True, f"pool: {pr}")
+    except Exception as e:
+        return StepResult("config", False, str(e))
+
+
+def _setup_model_credential(api_key: Optional[str]) -> StepResult:
+    """Store a model credential for the distiller. We persist it in komi-learn's
+    own env file (NOT in settings.json) so the hook subprocess can read it. If none
+    is available, that's fine — recall still works, distill no-ops."""
+    key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    env_path = paths.personal_root() / ".env"
+    try:
+        if key:
+            # write/refresh ANTHROPIC_API_KEY in komi's .env (0600 where possible)
+            lines = []
+            if env_path.exists():
+                lines = [ln for ln in env_path.read_text(encoding="utf-8").splitlines()
+                         if not ln.startswith("ANTHROPIC_API_KEY=")]
+            lines.append(f"ANTHROPIC_API_KEY={key}")
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            try:
+                os.chmod(env_path, 0o600)
+            except Exception:
+                pass
+            return StepResult("model", True, "API key stored for distillation")
+        # No key — check if the claude CLI is at least present as a fallback
+        if shutil.which("claude"):
+            return StepResult("model", True,
+                              "no API key; will try the claude CLI (OAuth) for distillation",
+                              fix="For reliable distillation set ANTHROPIC_API_KEY or run: komi-learn install --api-key sk-...")
+        return StepResult("model", True,
+                          "no model credential found — recall works; distillation is OFF",
+                          fix="Enable distillation: komi-learn install --api-key sk-...")
+    except Exception as e:
+        return StepResult("model", False, str(e))
+
+
+def _config_has_pool() -> bool:
+    try:
+        from . import config as cfg_mod
+        return bool(cfg_mod.load().pool_repo_url)
+    except Exception:
+        return False
+
+
+def _initial_sync() -> StepResult:
+    try:
+        from . import config as cfg_mod
+        from ...pool.github_backend import GitHubPool, PoolConfig
+        cfg = cfg_mod.load()
+        if not cfg.pool_enabled:
+            return StepResult("pool-sync", True, "pool not configured (skipped)")
+        pool = GitHubPool(PoolConfig(repo_url=cfg.pool_repo_url, cache_dir=cfg.pool_cache_dir,
+                                     branch=cfg.pool_branch,
+                                     require_signature=cfg.pool_require_signature))
+        r = pool.sync()
+        if r.ok:
+            n = len(pool.pull())
+            return StepResult("pool-sync", True, f"synced; {n} learning(s) available")
+        return StepResult("pool-sync", True, f"sync deferred ({r.detail[:60]})",
+                          fix="Will retry automatically on next session start.")
+    except Exception as e:
+        return StepResult("pool-sync", True, f"sync deferred ({e})")
+
+
+# ── uninstall ────────────────────────────────────────────────────────────
+
+def uninstall(*, keep_data: bool = True) -> InstallReport:
+    """Remove komi-learn's hooks from settings.json. Leaves learnings/config by
+    default (pass keep_data=False to also remove ~/.claude/komi)."""
+    rep = InstallReport()
+    sp = settings_path()
+    try:
+        if sp.exists():
+            data = json.loads(sp.read_text(encoding="utf-8"))
+            hooks = data.get("hooks", {})
+            removed = 0
+            for event in list(hooks.keys()):
+                kept = []
+                for entry in hooks[event]:
+                    entry_hooks = [h for h in entry.get("hooks", [])
+                                   if _HOOK_MARKER not in h.get("command", "")]
+                    if entry_hooks:
+                        kept.append({**entry, "hooks": entry_hooks})
+                    elif entry.get("hooks"):
+                        removed += 1
+                if kept:
+                    hooks[event] = kept
+                else:
+                    hooks.pop(event, None)
+            if not hooks:
+                data.pop("hooks", None)
+            sp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            rep.add("hooks", True, f"removed {removed} komi-learn hook entr(ies)")
+        else:
+            rep.add("hooks", True, "no settings.json")
+    except Exception as e:
+        rep.add("hooks", False, str(e))
+
+    if not keep_data:
+        try:
+            shutil.rmtree(paths.personal_root(), ignore_errors=True)
+            rep.add("data", True, "removed ~/.claude/komi")
+        except Exception as e:
+            rep.add("data", False, str(e))
+    else:
+        rep.add("data", True, "kept your learnings + config (use --purge to remove)")
+    return rep
+
+
+__all__ = ["install", "uninstall", "InstallReport", "StepResult", "settings_path",
+           "HOOK_EVENTS"]
