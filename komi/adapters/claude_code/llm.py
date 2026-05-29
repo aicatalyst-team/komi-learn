@@ -53,6 +53,20 @@ class AnthropicLLM:
     def available(self) -> bool:
         return self._client is not None
 
+    def test_call(self) -> tuple[bool, str]:
+        """Real one-token call to prove the API key actually works (not just present)."""
+        if not self._client:
+            return False, "anthropic SDK or API key missing"
+        try:
+            msg = self._client.messages.create(
+                model=self.model, max_tokens=16,
+                messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+            )
+            text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+            return (bool(text), "model responded" if text else "empty response")
+        except Exception as e:
+            return False, f"API call failed: {str(e)[:80]}"
+
     def complete(self, *, system: str, user: str) -> str:
         if not self._client:
             return "[]"

@@ -47,14 +47,21 @@ class StepResult:
 @dataclass
 class InstallReport:
     steps: list[StepResult] = field(default_factory=list)
+    requirements: list = field(default_factory=list)   # list[Requirement]
+    gated: bool = False                                 # True = stopped on unmet requirements
 
     def add(self, name, ok, detail="", fix=""):
         self.steps.append(StepResult(name, ok, detail, fix))
 
     @property
     def ok(self) -> bool:
-        # Install "succeeds" if the always-works core (hooks + config) is in place.
-        core = {"hooks", "config", "import"}
+        # Install succeeds only when not gated AND the core steps are in place.
+        if self.gated:
+            return False
+        core = {"hooks", "config", "import", "model"}
+        present = {s.name for s in self.steps}
+        if not ({"hooks", "config"} <= present):
+            return False
         return all(s.ok for s in self.steps if s.name in core)
 
 
@@ -82,33 +89,45 @@ def settings_path() -> Path:
 
 def install(*, pool_repo_url: Optional[str] = None,
             api_key: Optional[str] = None,
-            nudge_turns: int = 8) -> InstallReport:
-    """Full automated setup. Returns a report; never raises for expected issues."""
+            nudge_turns: int = 8,
+            allow_incomplete: bool = False) -> InstallReport:
+    """Full automated setup, GATED on verified requirements.
+
+    Order matters: we (a) persist an explicitly-supplied API key so the model
+    verification can see it, (b) run all REQUIRED checks — including a real model
+    call — and if any fails we STOP before touching settings.json and return a
+    failing report with exact fixes. Only when requirements pass (or
+    ``allow_incomplete``) do we register hooks. No silent degradation at install.
+    """
     rep = InstallReport()
 
-    # 1. import check — confirm komi-learn is importable by THIS interpreter
-    try:
-        import komi  # noqa: F401
-        rep.add("import", True, f"komi-learn importable ({sys.executable})")
-    except Exception as e:
-        rep.add("import", False, str(e),
-                fix="Reinstall: pip install komi-learn  (or pip install -e . from the repo)")
-        return rep  # nothing else will work
-
-    # 2. ensure dirs
+    # (a) ensure dirs + persist an explicit API key up front, so verify_model sees it
     try:
         paths.personal_root().mkdir(parents=True, exist_ok=True)
-        rep.add("dirs", True, str(paths.personal_root()))
     except Exception as e:
-        rep.add("dirs", False, str(e))
+        rep.add("import", False, f"cannot create {paths.personal_root()}: {e}")
+        return rep
+    if api_key:
+        _store_api_key(api_key)
 
-    # 3. hooks — merge into settings.json (backup + idempotent)
+    # (b) THE GATE — verify requirements for real
+    from . import requirements as reqmod
+    reqs = reqmod.collect(api_key=api_key, pool=bool(pool_repo_url))
+    rep.requirements = reqs
+    unmet = reqmod.unmet_required(reqs)
+    # map the core requirement names onto the report's notion of "ok"
+    for r in reqs:
+        if r.name in ("python", "claude-cli", "model"):
+            rep.add(r.name if r.name != "claude-cli" else "import",
+                    r.ok, r.detail, r.fix)
+
+    if unmet and not allow_incomplete:
+        rep.gated = True
+        return rep  # STOP — do not register hooks on an unmet setup
+
+    # (c) requirements satisfied → perform the install
     rep.steps.append(_install_hooks())
-
-    # 4. config — write/merge, set pool repo if given
     rep.steps.append(_write_config(pool_repo_url=pool_repo_url, nudge_turns=nudge_turns))
-
-    # 5. contributor key — generate the pseudonymous signing identity
     try:
         from ...pool.identity import Contributor
         c = Contributor(paths.keys_dir())
@@ -116,15 +135,25 @@ def install(*, pool_repo_url: Optional[str] = None,
     except Exception as e:
         rep.add("key", False, str(e),
                 fix="Optional: needed only to contribute to the pool. pip install pynacl")
-
-    # 6. model credential (best-effort; distill degrades without it)
-    rep.steps.append(_setup_model_credential(api_key))
-
-    # 7. initial pool sync (best-effort)
+    rep.steps.append(_model_status_step(api_key))
     if pool_repo_url or _config_has_pool():
         rep.steps.append(_initial_sync())
 
     return rep
+
+
+def _store_api_key(key: str) -> None:
+    env_path = paths.personal_root() / ".env"
+    lines = []
+    if env_path.exists():
+        lines = [ln for ln in env_path.read_text(encoding="utf-8").splitlines()
+                 if not ln.startswith("ANTHROPIC_API_KEY=")]
+    lines.append(f"ANTHROPIC_API_KEY={key}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    try:
+        os.chmod(env_path, 0o600)
+    except Exception:
+        pass
 
 
 def _install_hooks() -> StepResult:
@@ -197,48 +226,13 @@ def _write_config(*, pool_repo_url: Optional[str], nudge_turns: int) -> StepResu
         return StepResult("config", False, str(e))
 
 
-def _setup_model_credential(api_key: Optional[str]) -> StepResult:
-    """Store a model credential for the distiller. We persist it in komi-learn's
-    own env file (NOT in settings.json) so the hook subprocess can read it. If none
-    is available, that's fine — recall still works, distill no-ops."""
-    key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    env_path = paths.personal_root() / ".env"
-    try:
-        # An explicitly-passed key always wins (user opted into API-key distillation).
-        if key:
-            lines = []
-            if env_path.exists():
-                lines = [ln for ln in env_path.read_text(encoding="utf-8").splitlines()
-                         if not ln.startswith("ANTHROPIC_API_KEY=")]
-            lines.append(f"ANTHROPIC_API_KEY={key}")
-            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            try:
-                os.chmod(env_path, 0o600)
-            except Exception:
-                pass
-            return StepResult("model", True, "API key stored for distillation")
-
-        # No key — prefer free OAuth via the claude CLI. Probe to confirm login.
-        try:
-            from .llm_cli import ClaudeCLILLM
-            cli = ClaudeCLILLM()
-            if cli.available:
-                pr = cli.probe()
-                if pr.ok:
-                    return StepResult("model", True,
-                                      f"distillation via {pr.summary()} — no API key needed")
-                return StepResult("model", True,
-                                  "claude CLI found but not logged in — distillation OFF until you log in",
-                                  fix="Free OAuth distillation:  claude auth login   "
-                                      "(or:  komi-learn install --api-key sk-...)")
-        except Exception:
-            pass
-
-        return StepResult("model", True,
-                          "no model credential — recall works; distillation is OFF",
-                          fix="Log in:  claude auth login   or:  komi-learn install --api-key sk-...")
-    except Exception as e:
-        return StepResult("model", False, str(e))
+def _model_status_step(api_key: Optional[str]) -> StepResult:
+    """Re-state the (already-verified) model path for the install summary. The gate
+    in :func:`install` has already confirmed a working model with a real call; this
+    just reports which one, for the user-facing output."""
+    from . import requirements as reqmod
+    r = reqmod.verify_model(api_key=api_key)
+    return StepResult("model", r.ok, r.detail, r.fix)
 
 
 def _config_has_pool() -> bool:

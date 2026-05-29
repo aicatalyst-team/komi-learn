@@ -111,6 +111,22 @@ class ClaudeCLILLM:
         )
         return self._probe_cache
 
+    def test_call(self) -> tuple[bool, str]:
+        """Make a REAL tiny model call to prove distillation actually works.
+
+        This is stronger than :meth:`probe`: ``probe`` only asks "are you logged
+        in?", but a login can be valid while the model call still fails (e.g. an
+        org/context restriction). The install gate needs the truth, so we send a
+        one-token prompt and require a non-empty reply. Returns (ok, detail)."""
+        if not self._healthy:
+            return False, "claude CLI not found"
+        out = self._run(system="Reply with exactly: OK", user="ping", max_tokens_hint=16)
+        if out and "ok" in out.lower():
+            return True, "model responded"
+        if out:
+            return True, "model responded"  # any text means the call worked
+        return False, "claude -p returned nothing (login valid but model call blocked?)"
+
     def _run(self, *, system: str, user: str, max_tokens_hint: int = 2000) -> str:
         """One headless call. Returns model text, or "" on any failure."""
         if not self._healthy:

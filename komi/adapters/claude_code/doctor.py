@@ -98,39 +98,17 @@ def _check_config() -> Check:
 
 
 def _check_model() -> Check:
-    """Report which backend distillation will use, in the same priority order as
-    build_llm: OAuth (claude CLI, probed) → API key → off."""
-    # 1. OAuth via the claude CLI — preferred (free, no key). Probe confirms login.
-    try:
-        from .llm_cli import ClaudeCLILLM
-        cli = ClaudeCLILLM()
-        if cli.available:
-            pr = cli.probe()
-            if pr.ok:
-                return Check("distillation", "pass",
-                             f"using {pr.summary()} — no API key needed")
-    except Exception:
-        pass
+    """Verify distillation FOR REAL (a tiny model call), matching the install gate.
 
-    # 2. API key (env or komi's .env)
-    env_path = paths.personal_root() / ".env"
-    has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    if not has_key and env_path.exists():
-        has_key = any(ln.startswith("ANTHROPIC_API_KEY=") and len(ln) > 20
-                      for ln in env_path.read_text(encoding="utf-8").splitlines())
-    if has_key:
-        return Check("distillation", "pass", "using Anthropic API key")
-
-    # 3. CLI present but not logged in → actionable warning
-    if shutil.which("claude"):
-        return Check("distillation", "warn",
-                     "claude CLI found but not logged in",
-                     "Log in for free OAuth distillation:  claude auth login   "
-                     "(or supply a key:  komi-learn install --api-key sk-...)")
-
-    return Check("distillation", "warn",
-                 "no model credential — recall works, distillation is OFF",
-                 "Log in:  claude auth login   or:  komi-learn install --api-key sk-...")
+    Distillation is a REQUIRED capability under the strict-setup stance, so a model
+    that doesn't actually respond is a FAIL, not a warning — doctor and install
+    agree. (Network/transient failures will also read as fail here; re-run when
+    connectivity is back.)"""
+    from .requirements import verify_model
+    r = verify_model()
+    if r.ok:
+        return Check("distillation", "pass", r.detail)
+    return Check("distillation", "fail", r.detail, r.fix)
 
 
 def _check_pool() -> Check:

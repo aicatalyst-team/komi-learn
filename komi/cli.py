@@ -35,42 +35,64 @@ def _p(line: str = "") -> None:
 
 def cmd_install(args) -> int:
     from komi.adapters.claude_code import setup
-    _p(f"{PRODUCT}: installing for Claude Code…\n")
+    _p(f"{PRODUCT}: checking requirements…\n")
     rep = setup.install(pool_repo_url=args.pool, api_key=args.api_key,
-                        nudge_turns=args.nudge_turns)
+                        nudge_turns=args.nudge_turns,
+                        allow_incomplete=args.allow_incomplete)
+
+    # If the gate stopped us, show requirements + exact fixes and bail (non-zero).
+    if rep.gated:
+        for r in rep.requirements:
+            tag = "REQUIRED" if r.required else "optional"
+            _p(f"  {_TICK[r.ok]} {r.name:12} [{tag}] {r.detail}")
+        _p()
+        _p(f"{PRODUCT}: setup is incomplete — nothing was installed (your settings are untouched).")
+        _p("Fix the REQUIRED item(s) below, then re-run  komi-learn install :\n")
+        for r in rep.requirements:
+            if r.required and not r.ok and r.fix:
+                _p(f"  • {r.name}:")
+                for ln in r.fix.split("\n"):
+                    _p(f"      {ln}")
+        _p("\n(Advanced: --allow-incomplete installs anyway, but distillation won't work until fixed.)")
+        return 1
+
     for s in rep.steps:
         _p(f"  {_TICK[s.ok]} {s.name:12} {s.detail}")
         if not s.ok and s.fix:
             _p(f"      → {s.fix}")
-        elif s.fix and s.name in ("model",):
-            _p(f"      note: {s.fix}")
     _p()
     if rep.ok:
-        _p(f"{PRODUCT} is installed. Recall is active in your next Claude Code session — no commands needed.")
+        _p(f"{PRODUCT} is installed and verified. Recall + distillation are active in your")
+        _p("next Claude Code session — no commands needed.")
         if not args.pool:
             _p("Tip: join the global pool with  komi-learn install --pool <repo-url>")
         _p("Check anytime with:  komi-learn doctor")
         return 0
-    _p(f"{PRODUCT}: install incomplete — see the ✗ items above.")
-    return 1
+    _p(f"{PRODUCT}: installed with --allow-incomplete; some features are off until requirements are met.")
+    return 0 if args.allow_incomplete else 1
 
 
 def cmd_doctor(args) -> int:
     from komi.adapters.claude_code.doctor import run_doctor
     _p(f"{PRODUCT} doctor:\n")
     checks = run_doctor()
-    worst_fail = False
+    failed = []
     for c in checks:
         _p(f"  {_TICK[c.status]} {c.name:13} {c.detail}")
         if c.status != "pass" and c.fix:
             _p(f"      → {c.fix}")
         if c.status == "fail":
-            worst_fail = True
+            failed.append(c.name)
     _p()
-    if worst_fail:
-        _p(f"{PRODUCT}: there are issues above that stop recall from working.")
+    if failed:
+        recall_critical = {"install", "hooks", "config"} & set(failed)
+        if recall_critical:
+            _p(f"{PRODUCT}: recall is NOT working — fix the failed item(s) above.")
+        else:
+            _p(f"{PRODUCT}: recall works, but the full loop is incomplete "
+               f"({', '.join(failed)} failed). Fix the item(s) above for distillation.")
         return 1
-    _p(f"{PRODUCT}: healthy. (Warnings are optional features, not failures.)")
+    _p(f"{PRODUCT}: healthy — recall and distillation are both verified working.")
     return 0
 
 
@@ -160,6 +182,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Anthropic API key for distillation (else uses env / claude CLI)")
     pi.add_argument("--nudge-turns", type=int, default=8,
                     help="distill every N turns (default 8)")
+    pi.add_argument("--allow-incomplete", action="store_true",
+                    help="install even if required checks fail (distillation may not work)")
     pi.set_defaults(func=cmd_install)
 
     pd = sub.add_parser("doctor", help="diagnose the install and suggest fixes")

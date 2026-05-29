@@ -83,20 +83,39 @@ python -m pytest tests/ -q        # 50 passing
 
 ---
 
+## Requirements
+
+komi-learn refuses to half-install. `komi-learn install` **verifies every
+requirement for real** — including an actual model call — and if something's
+missing it stops, leaves your settings untouched, and tells you exactly what to
+fix. If it says installed, the full loop genuinely works.
+
+| Requirement | Why | How |
+|---|---|---|
+| Python 3.10+ with komi-learn | the engine | `pip install komi-learn` |
+| Claude Code (`claude` CLI) | the host komi-learn plugs into | [claude.com/claude-code](https://claude.com/claude-code) |
+| A **working model** (OAuth *or* API key) | distillation reads sessions | `claude auth login` *or* `--api-key sk-ant-...` |
+| git *(optional)* | global-pool transport | only if you join the pool |
+| pynacl *(optional)* | sign pool contributions | only to contribute to the pool |
+
+The model requirement is checked with a real call, not just "is a key set" — a
+login that can't actually reach the model is reported as a failure, not a false OK.
+
 ## Install for Claude Code (one command)
 
 ```bash
 pip install komi-learn        # (today: pip install -e . from this repo)
-komi-learn install            # set up everything, automatically
+claude auth login             # free OAuth distillation (or use --api-key below)
+komi-learn install            # verify requirements + set everything up
 ```
 
 That single `komi-learn install`:
+- **verifies all requirements first** (and stops with exact fixes if any is unmet),
 - detects your Python and registers the hooks in `~/.claude/settings.json`
   (backed up first, merged not clobbered, using an absolute interpreter path so
   it can't break on a PATH mismatch),
-- writes config and generates your pseudonymous contributor key,
-- enables distillation if a model credential is available, and
-- **recall starts working in your very next session — no commands, no config.**
+- writes config and generates your pseudonymous contributor key, and
+- **recall + distillation start working in your very next session — no commands.**
 
 **Distillation auth — zero-config when possible.** komi-learn prefers **free OAuth
 via your existing Claude.ai login** (the `claude` CLI) — no API key, no per-call
@@ -119,10 +138,17 @@ komi-learn sync        # pull the latest global learnings now
 komi-learn uninstall   # remove hooks (keeps your learnings; --purge to wipe)
 ```
 
-**Reliability model:** *recall always works* — it needs no model and no auth, so
-every user gets value immediately. *Distillation is best-effort* — it uses your
-model credential when available and silently turns off otherwise. komi-learn
-never breaks your agent, even when one of its own optional pieces can't run.
+**Reliability model — strict at install, safe at runtime:**
+- **Install is a strict gate.** It verifies every requirement (incl. a real model
+  call) and fails loudly with exact fixes rather than half-installing. No false
+  "it's working." (`--allow-incomplete` overrides if you really want to.)
+- **Runtime never breaks your agent.** Once installed, if a hook ever can't reach
+  the model mid-session (network blip, etc.) it no-ops silently — a learning pass
+  is skipped, your session is never interrupted. Recall, which needs no model,
+  keeps working regardless.
+
+Run `komi-learn doctor` anytime — it re-verifies everything (with a real model
+call) and tells you precisely what's healthy and what to fix.
 
 Personal learnings live under `~/.claude/komi/`; project learnings under
 `<project>/.claude/komi/` (committable, team-shareable). They share one index.
