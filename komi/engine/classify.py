@@ -38,47 +38,51 @@ from .model import Learning, Scope, Category
 # (pool-repo-template/.github/scripts/verify.py). A parity test asserts they match.
 # When in doubt the floor over-rejects (to personal) — false positives are cheap,
 # false negatives leak. Each entry names what it catches.
+# Quantifiers are UPPER-bounded (not open `{n,}`) as defense-in-depth: it keeps
+# matches cheap on pathological input and is good hygiene. (Measured ReDoS on the
+# prior open forms was negligible, and safety_floor also caps input length below —
+# this is belt-and-suspenders, not a fix for a live ReDoS.)
 _SECRET_PATTERNS = [
-    re.compile(r"\b(sk|pk|rk)[-_](?:live|test|proj)?[-_]?[A-Za-z0-9]{16,}\b"),  # OpenAI/Stripe sk-/sk_/sk_live_/rk_live_/pk_
+    re.compile(r"\b(sk|pk|rk)[-_](?:live|test|proj)?[-_]?[A-Za-z0-9]{16,120}\b"),  # OpenAI/Stripe sk-/sk_/sk_live_/rk_live_/pk_
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                            # AWS access key id
     re.compile(r"\bASIA[0-9A-Z]{16}\b"),                            # AWS temp access key
-    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"),                     # Google API key
-    re.compile(r"\bya29\.[0-9A-Za-z_\-]+"),                         # Google OAuth access token
-    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),                  # GitHub classic tokens
-    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),                # GitHub fine-grained PAT
-    re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,}\b"),                   # GitLab PAT
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),                # Slack tokens
-    re.compile(r"\bxapp-[0-9]+-[A-Za-z0-9-]{10,}\b"),               # Slack app token
-    re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}\b"), # SendGrid
-    re.compile(r"\bnpm_[A-Za-z0-9]{30,}\b"),                        # npm token
-    re.compile(r"\bdop_v1_[a-f0-9]{32,}\b"),                        # DigitalOcean token
-    re.compile(r"\bAC[a-f0-9]{32}\b"),                              # Twilio Account SID
-    re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"),                         # HuggingFace token
-    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),          # PEM private keys
-    re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"),  # JWT
-    # connection strings carrying a password: scheme://user:pass@host
-    re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:[^\s:/@]+@[^\s/]+", re.I),
-    re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|token|bearer|client[_-]?secret)\b\s*[:=]\s*['\"]?\S{6,}"),
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,80}\b"),                  # Google API key
+    re.compile(r"\bya29\.[0-9A-Za-z_\-]{10,400}"),                 # Google OAuth access token
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,120}\b"),              # GitHub classic tokens
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_\-]{20,120}\b"),          # GitHub fine-grained PAT (allow hyphens)
+    re.compile(r"\bglpat-[A-Za-z0-9_\-]{16,120}\b"),               # GitLab PAT
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,120}\b"),            # Slack tokens
+    re.compile(r"\bxapp-[0-9]+-[A-Za-z0-9-]{10,120}\b"),           # Slack app token
+    re.compile(r"\bSG\.[A-Za-z0-9_\-]{16,80}\.[A-Za-z0-9_\-]{16,80}\b"),  # SendGrid
+    re.compile(r"\bnpm_[A-Za-z0-9]{30,120}\b"),                    # npm token
+    re.compile(r"\bdop_v1_[a-f0-9]{32,120}\b"),                    # DigitalOcean token
+    re.compile(r"\bAC[a-f0-9]{32}\b"),                             # Twilio Account SID
+    re.compile(r"\bhf_[A-Za-z0-9]{20,120}\b"),                     # HuggingFace token
+    re.compile(r"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----"),     # PEM private keys
+    re.compile(r"\beyJ[A-Za-z0-9_-]{8,400}\.[A-Za-z0-9_-]{8,400}\.[A-Za-z0-9_-]{8,400}\b"),  # JWT
+    # connection strings carrying a password: scheme://user:pass@host(/path?query)
+    re.compile(r"\b[a-z][a-z0-9+.\-]{0,20}://[^\s:/@]{1,100}:[^\s:/@]{1,100}@[^\s]{1,200}", re.I),
+    re.compile(r"(?i)\b(password|passwd|secret|api[_-]?key|access[_-]?key|auth[_-]?token|token|bearer|client[_-]?secret)\b\s*[:=]\s*['\"]?[^\s'\"]{6,120}"),
 ]
 
 _PII_PATTERNS = [
-    re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),     # email
+    re.compile(r"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,100}\.[A-Za-z]{2,10}\b"),     # email
     re.compile(r"\b(?:\+?\d{1,3}[\s.\-]?)?(?:\(?\d{2,4}\)?[\s.\-]?){2,5}\d{2,4}\b"),  # phone-ish (intl-tolerant)
-    re.compile(r"\b\d{1,5}\s+[A-Z][a-z]+\s+(St|Street|Ave|Avenue|Rd|Road|Blvd|Lane|Ln|Dr|Drive)\b"),
+    re.compile(r"\b\d{1,5}\s+[A-Z][a-z]{1,20}\s+(St|Street|Ave|Avenue|Rd|Road|Blvd|Lane|Ln|Dr|Drive)\b"),
     re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),                           # US SSN
-    re.compile(r"\b(?:\d[ -]*?){13,16}\b"),                         # credit-card-ish (13-16 digits)
+    re.compile(r"\b(?:\d[ -]{0,2}){13,16}\b"),                     # credit-card-ish (13-16 digits)
 ]
 
 _IDENTIFIER_PATTERNS = [
-    re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\\s]+"),                   # Windows home path
-    re.compile(r"/(?:home|Users)/[^/\s]+"),                        # *nix / macOS home path
-    re.compile(r"/root/[^/\s]+"),                                  # root home
+    re.compile(r"(?i)\b[A-Z]:\\Users\\[^\\\s]{1,200}"),            # Windows home path
+    re.compile(r"/(?:home|Users)/[^/\s]{1,200}"),                 # *nix / macOS home path
+    re.compile(r"/root/[^/\s]{1,200}"),                           # root home
     re.compile(r"\bhttps?://(?:\d{1,3}\.){3}\d{1,3}\b"),           # raw IPv4 URL
     re.compile(r"\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.(?:\d{1,3}\.){1,2}\d{1,3}\b"),  # private IPv4
-    re.compile(r"\bhttps?://\[[0-9a-fA-F:]+\]"),                    # IPv6 URL
+    re.compile(r"\bhttps?://\[[0-9a-fA-F:]{1,100}\]"),             # IPv6 URL
     re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){4,7}[0-9a-fA-F]{0,4}\b"),  # bare IPv6
-    re.compile(r"(?i)\bhttps?://[a-z0-9-]+\.(?:internal|local|corp|intranet|lan)\b"),
-    re.compile(r"(?i)\b[a-z0-9-]+\.onion\b"),                       # tor hidden service
+    re.compile(r"(?i)\bhttps?://[a-z0-9-]{1,100}\.(?:internal|local|corp|intranet|lan)\b"),
+    re.compile(r"(?i)\b[a-z0-9-]{1,100}\.onion\b"),                # tor hidden service
 ]
 
 
@@ -96,6 +100,10 @@ def safety_floor(text: str, *, project_terms: Optional[list[str]] = None) -> Flo
     present, pin a learning to *project* scope — generally true, but the project name
     in it would deanonymize. They do not block storage, only globalization.
     """
+    # Bound the scanned length: a learning is short prose, and capping the input
+    # is the simplest robust guard against any pathological-input slowdown.
+    if text and len(text) > 20000:
+        text = text[:20000]
     reasons: list[str] = []
     secret = False
     for pat in _SECRET_PATTERNS:

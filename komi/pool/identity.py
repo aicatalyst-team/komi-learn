@@ -56,8 +56,12 @@ class Contributor:
             self._algo = "unsigned"
             return
 
+        import os
         import nacl.signing
         if self.key_path.exists():
+            # Fail CLOSED on insecure permissions: a world/group-readable private
+            # key means anyone on the box can forge your signed contributions.
+            _require_owner_only(self.key_path)
             data = json.loads(self.key_path.read_text(encoding="utf-8"))
             self._signing = nacl.signing.SigningKey(base64.b64decode(data["private"]))
         else:
@@ -67,12 +71,9 @@ class Contributor:
                 "private": base64.b64encode(bytes(self._signing)).decode(),
                 "public": base64.b64encode(bytes(self._signing.verify_key)).decode(),
             }
-            self.key_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            try:
-                import os
-                os.chmod(self.key_path, 0o600)
-            except Exception:
-                pass
+            # Atomic write with 0600 set on the temp file BEFORE it's in place, so
+            # the private key is never briefly world-readable (umask race).
+            _atomic_write_private(self.key_path, json.dumps(data, indent=2))
         self._verify_b64 = base64.b64encode(bytes(self._signing.verify_key)).decode()
         self._algo = "ed25519"
 
@@ -89,6 +90,38 @@ class Contributor:
             sig = self._signing.sign(message).signature
             return base64.b64encode(sig).decode()
         return ""  # unsigned mode
+
+
+def _require_owner_only(path) -> None:
+    """Raise if the key file is readable by group/other (POSIX). On Windows the
+    permission bits don't map the same way, so we skip the check there (NTFS ACLs
+    aren't represented in st_mode) — but on any POSIX host an insecure key aborts."""
+    import os
+    import stat
+    if os.name == "nt":
+        return
+    mode = os.stat(path).st_mode
+    if mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise PermissionError(
+            f"Contributor key {path} is accessible by group/other. "
+            f"Fix it: chmod 600 {path}"
+        )
+
+
+def _atomic_write_private(path, text: str) -> None:
+    """Write a private key file atomically with 0600 set before it's in place."""
+    import os
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".key-")
+    try:
+        os.chmod(tmp, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def verify_signature(message: bytes, signature_b64: str, public_key_b64: str) -> bool:

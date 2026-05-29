@@ -175,8 +175,11 @@ def _render(identity, jit, cfg: RecallConfig) -> str:
             parts.append(_COMMUNITY_NOTE)
         for r in jit:
             tag = " [community]" if r["scope"] == Scope.GLOBAL.value else ""
-            trig = f" — *when:* {r['trigger']}" if r["trigger"] else ""
-            parts.append(f"- **{r['title']}**{tag}: {_clip(r['body'], 240)}{trig}\n")
+            title = _sanitize(r["title"])
+            body = _sanitize(_clip(r["body"], 240))
+            trig_txt = _sanitize(r["trigger"]) if r["trigger"] else ""
+            trig = f" — *when:* {trig_txt}" if trig_txt else ""
+            parts.append(f"- **{title}**{tag}: {body}{trig}\n")
 
     parts.append(_FRAME_CLOSE)
     text = "".join(parts)
@@ -188,20 +191,42 @@ def _render(identity, jit, cfg: RecallConfig) -> str:
 def _mark_recalled(store: Store, ids: list[str]) -> None:
     """Bump the recall counter so analytics/curation can see what actually surfaces.
     (Reuse — the stronger signal — is credited separately when a learning is acted on.)"""
-    if not ids:
-        return
-    try:
-        store._db.executemany(
-            "UPDATE learnings SET last_used=? WHERE id=?",
-            [(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), i) for i in ids],
-        )
-        store._db.commit()
-    except Exception:
-        pass
+    store.record_recalled(ids)
+
+
+import re as _re
+
+# Anything that could let untrusted recalled content escape the data fence or
+# impersonate a system/role marker. Recalled learnings come from the PUBLIC pool,
+# so their text is hostile input — neutralize it before it enters the block.
+_FENCE_RE = _re.compile(r"</?\s*komi-recall\b[^>]*>", _re.IGNORECASE)
+# any HTML/XML-ish tag could be read as structure (fake <system>, </s>, etc.)
+_TAGISH_RE = _re.compile(r"</?\s*[a-zA-Z][\w-]*\s*/?>")
+# role markers anywhere (after newline-collapse they end up mid-line) → defang the colon
+_ROLE_MARKER_RE = _re.compile(r"(?i)\b(system|assistant|user|developer|tool|human)\s*:")
+
+
+def _sanitize(text: str) -> str:
+    """Make a recalled string safe to embed inside the <komi-recall> data block.
+
+    Recalled learnings come from the PUBLIC pool, so their text is hostile input.
+    We: (1) strip komi-recall tags so a body can't inject a fake closer and break
+    out; (2) strip any other XML/HTML-ish tags that could read as structure;
+    (3) defang role markers (System:/Assistant:/…) that could read as a turn
+    boundary; (4) drop control chars; (5) collapse whitespace to one line so
+    newlines can't start a fake turn. Belt-and-suspenders for the #1 threat."""
+    if not text:
+        return ""
+    text = _FENCE_RE.sub("[fenced]", text)
+    text = _TAGISH_RE.sub("[tag]", text)
+    text = _ROLE_MARKER_RE.sub(lambda m: m.group(0).replace(":", "∶"), text)  # ratio colon
+    text = "".join(ch for ch in text if ch == " " or ch.isprintable())
+    return " ".join(text.split())
 
 
 def _oneline(title: str, body: str) -> str:
-    body = _clip(body, 160)
+    title = _sanitize(title)
+    body = _sanitize(_clip(body, 160))
     return f"{title}: {body}" if body and body.lower() not in title.lower() else title
 
 

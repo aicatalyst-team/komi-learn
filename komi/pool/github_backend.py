@@ -49,7 +49,44 @@ class GitResult:
     extra: dict = field(default_factory=dict)
 
 
+import re as _re
+
+# Whitelist of acceptable pool repo URLs. repo_url can come from a config file or
+# env var (a trust boundary), so we validate it before it ever reaches git/gh —
+# rejecting anything that isn't a clean GitHub https/ssh URL or a local path.
+_GH_HTTPS = _re.compile(r"^https://github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+(?:\.git)?/?$")
+_GH_SSH = _re.compile(r"^git@github\.com:[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+(?:\.git)?/?$")
+
+
+def valid_repo_url(url: str) -> bool:
+    """True if ``url`` is a safe pool source: a GitHub https/ssh URL, a file:// URL,
+    or an existing local directory. Anything else (shell metachars, odd schemes) is
+    rejected so it can't reach a subprocess."""
+    if not url:
+        return False
+    if _GH_HTTPS.match(url) or _GH_SSH.match(url):
+        return True
+    raw = url[len("file://"):] if url.startswith("file://") else url
+    # a local path is only valid if it actually exists and has no shell metachars
+    if any(c in raw for c in ";|&`$<>\n\r"):
+        return False
+    try:
+        from pathlib import Path
+        return Path(raw).exists()
+    except Exception:
+        return False
+
+
+def _safe_args(args: list[str]) -> bool:
+    """Reject subprocess args containing null bytes or newlines (defense in depth;
+    subprocess list-form already prevents shell interpretation, but a newline in a
+    branch/ref is never legitimate)."""
+    return all(isinstance(a, str) and "\x00" not in a and "\n" not in a for a in args)
+
+
 def _git(args: list[str], cwd: Optional[str] = None, timeout: int = 60) -> GitResult:
+    if not _safe_args(args):
+        return GitResult(False, "unsafe-git-arg")
     try:
         p = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
                            text=True, timeout=timeout)
@@ -81,6 +118,9 @@ class GitHubPool:
         """Clone the pool repo into the cache, or pull if already present."""
         if not self.cfg.repo_url or not self.cache:
             return GitResult(False, "pool-not-configured")
+        if not valid_repo_url(self.cfg.repo_url):
+            return GitResult(False, "invalid-repo-url",
+                             {"hint": "repo_url must be a github.com https/ssh URL or a local path"})
         if (self.cache / ".git").exists():
             r = _git(["-C", str(self.cache), "pull", "--ff-only", "origin", self.cfg.branch])
             return r if r.ok else _git(["-C", str(self.cache), "fetch", "origin", self.cfg.branch])
@@ -99,6 +139,8 @@ class GitHubPool:
         is a no-op success (the content-addressed path means same lesson → same file)."""
         if not self.cache:
             return GitResult(False, "pool-not-configured")
+        if self.cfg.repo_url and not valid_repo_url(self.cfg.repo_url):
+            return GitResult(False, "invalid-repo-url")
         if not (self.cache / ".git").exists():
             # nothing synced yet; for local pools we can init on demand
             if self.cfg.mode == "local":

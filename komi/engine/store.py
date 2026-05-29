@@ -409,6 +409,40 @@ class Store:
     def rows(self, *, state: str = "active") -> list[sqlite3.Row]:
         return list(self._db.execute("SELECT * FROM learnings WHERE state=?", (state,)))
 
+    # ── public telemetry / mirror API ───────────────────────────────────
+    # These exist so consumers (recall, the adapter) stop reaching into Store
+    # internals (_db, _index_one, _root_key). The encapsulation lets the index
+    # backend change later without hunting down private accesses.
+
+    def record_recalled(self, ids: list[str], *, when: Optional[str] = None) -> None:
+        """Mark learnings as recalled (last_used) for usage analytics."""
+        if not ids:
+            return
+        ts = when or _now_iso()
+        try:
+            self._db.executemany("UPDATE learnings SET last_used=? WHERE id=?",
+                                 [(ts, i) for i in ids])
+            self._db.commit()
+        except Exception:
+            pass
+
+    def mirror_external(self, learnings: Iterable[Learning], *, source: str) -> int:
+        """Index externally-sourced learnings (e.g. the synced global pool) WITHOUT
+        writing local Markdown — they live in their own origin_root namespace so a
+        local reindex never clobbers them and vice-versa. Returns count."""
+        ext = Store.__new__(Store)          # lightweight view sharing this db
+        ext.root = self.root / "_external" / source
+        ext._root_key = f"external:{source}"
+        ext.index_path = self.index_path
+        ext._db = self._db
+        ext._db.execute("DELETE FROM learnings WHERE origin_root=?", (ext._root_key,))
+        n = 0
+        for lng in learnings:
+            ext._index_one(lng, source=source)
+            n += 1
+        ext._db.commit()
+        return n
+
     def close(self) -> None:
         self._db.close()
 

@@ -103,6 +103,14 @@ def load() -> Config:
     for env_key, attr in _ENV.items():
         if env_key in os.environ:
             setattr(cfg, attr, _coerce(os.environ[env_key], getattr(cfg, attr)))
+    # Loud warning: accepting unsigned pool entries is only safe for a private/test
+    # pool. For a public pool it lets anyone inject unsigned learnings.
+    if cfg.pool_enabled and not cfg.pool_require_signature:
+        import sys
+        sys.stderr.write(
+            "komi-learn WARNING: pool.require_signature is False — unsigned learnings "
+            "will be accepted. Only safe for a private/test pool.\n"
+        )
     return cfg
 
 

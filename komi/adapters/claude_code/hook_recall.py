@@ -91,14 +91,9 @@ def _mirror_pool_into_index(personal: Store) -> None:
         learnings = pool.pull(limit=500)
         if not learnings:
             return
-        # Mirror under a dedicated 'pool' store so it has its own origin_root slice
-        # and never collides with personal/project rows on reindex.
-        pool_store = Store(paths.personal_root() / "pool", index_path=paths.index_path())
-        pool_store._db.execute("DELETE FROM learnings WHERE origin_root=?", (pool_store._root_key,))
-        pool_store._db.commit()
-        for lng in learnings:
-            pool_store._index_one(lng, source="pool")
-        pool_store.close()
+        # Mirror via the Store's public API (own origin_root namespace, never
+        # collides with personal/project rows). No reach into Store internals.
+        personal.mirror_external(learnings, source="pool")
     except Exception:
         pass
 
