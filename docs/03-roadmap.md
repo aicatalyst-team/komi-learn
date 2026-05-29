@@ -20,10 +20,13 @@
 
 ## 🔜 Next
 
-**Phase 5 — Trust & quality at scale** *(best once the pool has volume)*
-- Corroboration-based trust: a learning signed by N independent contributors ranks higher; low-trust isn't pulled by default.
-- Confidence/reuse-driven ranking; pool-side near-duplicate linking.
-- Embedding-based recall & clustering (upgrade from keyword FTS → semantic similarity). Sharper recall, better umbrella detection.
+**Phase 5 — Trust & quality at scale**
+- ✅ **Semantic recall (done).** Meaning-based recall via a local embedding model
+  (`komi-learn[smart]`), keyword fallback when absent. `engine/embed.py`,
+  `vector_search`, semantic-first `_candidate_hits`. Verified with the real model.
+- 🔜 Corroboration-based trust: a learning signed by N independent contributors
+  ranks higher; low-trust isn't pulled by default. (No new deps — next.)
+- 🔜 Embedding-based *clustering* in the curator (better umbrella detection).
 
 **Phase 6 — Second host adapter** *(proves "works for every agent")*
 - A non–Claude-Code adapter (Codex, or a chat UI) behind the same two-method interface (`recall()` + `on_session_end()`). The real test that the substrate isn't Claude-specific.

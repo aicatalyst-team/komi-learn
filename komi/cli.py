@@ -14,6 +14,7 @@ credential is available.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 PRODUCT = "komi-learn"
@@ -34,6 +35,7 @@ def _p(line: str = "") -> None:
 # ── commands ───────────────────────────────────────────────────────────────
 
 def _cmd_install_codex(args) -> int:
+    _run_wizard_if_enabled(args)
     from komi.adapters.codex import setup as codex_setup
     _p(f"{PRODUCT}: installing for OpenAI Codex CLI…\n")
     rep = codex_setup.install(pool_repo_url=args.pool, api_key=args.api_key,
@@ -51,9 +53,25 @@ def _cmd_install_codex(args) -> int:
     return 1
 
 
+def _run_wizard_if_enabled(args) -> None:
+    """Run the interactive setup wizard (unless --no-wizard), folding its answers
+    back into args so the real installer uses them."""
+    if getattr(args, "no_wizard", False):
+        return
+    from komi.wizard import run_wizard
+    choices = run_wizard(
+        host=getattr(args, "host", "claude-code"),
+        pool_url=args.pool, api_key=args.api_key, nudge_turns=args.nudge_turns,
+        assume_yes=getattr(args, "yes", False),
+    )
+    args.pool = choices["pool_url"]
+    args.nudge_turns = choices["nudge_turns"]
+
+
 def cmd_install(args) -> int:
     if getattr(args, "host", "claude-code") == "codex":
         return _cmd_install_codex(args)
+    _run_wizard_if_enabled(args)
     from komi.adapters.claude_code import setup
     _p(f"{PRODUCT}: checking requirements…\n")
     rep = setup.install(pool_repo_url=args.pool, api_key=args.api_key,
@@ -90,6 +108,65 @@ def cmd_install(args) -> int:
         return 0
     _p(f"{PRODUCT}: installed with --allow-incomplete; some features are off until requirements are met.")
     return 0 if args.allow_incomplete else 1
+
+
+def _host_paths(host: str):
+    if host == "codex":
+        from komi.adapters.codex import paths
+    else:
+        from komi.adapters.claude_code import paths
+    return paths
+
+
+def cmd_config(args) -> int:
+    """Tinker settings AFTER install — interactive menu, or `config show` / `config set`."""
+    from komi.adapters import config_io
+    from komi import cli_prompt as PR
+    paths = _host_paths(getattr(args, "host", "claude-code"))
+    data = config_io.load_raw(paths)
+
+    if getattr(args, "action", None) == "show":
+        _p(json.dumps(data, indent=2) if data else "(no config yet — run komi-learn install)")
+        return 0
+
+    if getattr(args, "action", None) == "set":
+        config_io.set_key(data, args.key, args.value)
+        config_io.save_raw(paths, data)
+        _p(f"{PRODUCT}: set {args.key} = {config_io.get_key(data, args.key)}")
+        return 0
+
+    # interactive menu
+    _p(f"{PRODUCT} config — change anything anytime (Enter keeps current).\n")
+    # pool
+    cur_pool = (data.get("pool", {}) or {}).get("repo_url", "")
+    if PR.ask_yes_no("Join / stay in the community pool?", default=bool(cur_pool),
+                     summary="Receive useful shared tips + queue your anonymized ones (you approve each share)."):
+        from komi.wizard import DEFAULT_POOL_URL
+        url = PR.ask_text("Pool repo URL", default=cur_pool or DEFAULT_POOL_URL)
+        config_io.set_key(data, "pool.repo_url", url)
+        config_io.set_key(data, "pool.require_signature", True)
+    else:
+        config_io.set_key(data, "pool.repo_url", "")
+    # semantic
+    cur_sem = (data.get("recall", {}) or {}).get("semantic", True)
+    want_sem = PR.ask_yes_no("Use semantic (meaning-based) recall?", default=cur_sem,
+                             summary="Smarter recall via a local model (falls back to keyword search if off/unavailable).")
+    config_io.set_key(data, "recall.semantic", want_sem)
+    if want_sem:
+        from komi import model_install
+        if not model_install.is_installed():
+            if PR.ask_yes_no("Download the model now (~300MB)?", default=True):
+                ok, detail = model_install.install_model(quiet=True)
+                _p(f"    {'ready' if ok else 'install failed: ' + detail}")
+    # cadence
+    cur_turns = data.get("nudge_turns", 8)
+    turns = PR.ask_text("Distill every N turns", default=str(cur_turns),
+                        summary="How often it learns from a session in the background.")
+    config_io.set_key(data, "nudge_turns", turns)
+
+    config_io.save_raw(paths, data)
+    _p(f"\n{PRODUCT}: saved. Run `komi-learn doctor` to confirm.")
+    return 0
 
 
 def cmd_doctor(args) -> int:
@@ -251,10 +328,23 @@ def build_parser() -> argparse.ArgumentParser:
                     help="distill every N turns (default 8)")
     pi.add_argument("--allow-incomplete", action="store_true",
                     help="install even if required checks fail (distillation may not work)")
+    pi.add_argument("--yes", "-y", action="store_true",
+                    help="accept all wizard defaults (pool on, semantic on) — for scripts")
+    pi.add_argument("--no-wizard", action="store_true",
+                    help="skip the interactive wizard; use flags/defaults only")
     pi.set_defaults(func=cmd_install)
 
     pd = sub.add_parser("doctor", help="diagnose the install and suggest fixes")
     pd.set_defaults(func=cmd_doctor)
+
+    pcfg = sub.add_parser("config", help="change settings anytime (menu, or show/set)")
+    pcfg.add_argument("--host", choices=["claude-code", "codex"], default="claude-code")
+    csub = pcfg.add_subparsers(dest="action")
+    csub.add_parser("show", help="print the current config")
+    cset = csub.add_parser("set", help="set a key (e.g. pool.repo_url, recall.semantic, nudge_turns)")
+    cset.add_argument("key")
+    cset.add_argument("value")
+    pcfg.set_defaults(func=cmd_config)
 
     ps = sub.add_parser("status", help="show config + learning counts")
     ps.set_defaults(func=cmd_status)

@@ -35,6 +35,7 @@ def build_recall_block(paths_mod, *, cwd: str, recent_files: Optional[list[str]]
     opens the personal store, mirrors the project store + synced pool into the
     shared index, runs recall. Returns "" on any failure (never break a session)."""
     try:
+        _apply_semantic_pref(paths_mod)
         from ..engine.store import Store
         from ..engine.recall import recall as _recall, RecallConfig
         personal = Store(paths_mod.personal_root(), index_path=paths_mod.index_path())
@@ -46,6 +47,25 @@ def build_recall_block(paths_mod, *, cwd: str, recent_files: Optional[list[str]]
                        prompt_hint=prompt_hint, config=RecallConfig(k=recall_k))
     except Exception:
         return ""
+
+
+def _apply_semantic_pref(paths_mod) -> None:
+    """Export the user's recall.semantic preference to KOMI_SEMANTIC so the
+    host-agnostic engine honors 'semantic off' even when the model is installed."""
+    try:
+        import json as _json
+        import os as _os
+        cfg_path = paths_mod.personal_root() / "config.json"
+        if not cfg_path.exists():
+            return
+        data = _json.loads(cfg_path.read_text(encoding="utf-8"))
+        sem = (data.get("recall") or {}).get("semantic")
+        if sem is not None:
+            _os.environ["KOMI_SEMANTIC"] = "1" if sem else "0"
+            from ..engine import embed
+            embed._reset_cache_for_tests()   # re-resolve with the new pref
+    except Exception:
+        pass
 
 
 def _mirror_pool(paths_mod, personal) -> None:

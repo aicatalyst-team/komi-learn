@@ -76,15 +76,29 @@ _cached: Optional[object] = None
 _resolved = False
 
 
-def get_embedder() -> Optional[Embedder]:
-    """Return a working embedder, or None if the model backend isn't available.
+def semantic_enabled() -> bool:
+    """Respect a user 'turn semantic off' preference even when the model IS present.
+    Checked via KOMI_SEMANTIC=0/1 (set by the engine from config). Default on.
 
-    Result is cached per process. None is the signal to fall back to keyword
-    search — callers must handle it (the whole point of the zero-dep guarantee)."""
+    Engine code is host-agnostic so it can't read the host config directly; the
+    adapter exports the flag to the env. Absent → on."""
+    val = os.environ.get("KOMI_SEMANTIC")
+    if val is None:
+        return True
+    return val.strip().lower() not in ("0", "false", "no", "off")
+
+
+def get_embedder() -> Optional[Embedder]:
+    """Return a working embedder, or None if unavailable OR the user disabled
+    semantic recall. None is the signal to fall back to keyword search — callers
+    must handle it (the whole point of the zero-dep guarantee)."""
     global _cached, _resolved
     if _resolved:
         return _cached  # type: ignore[return-value]
     _resolved = True
+    if not semantic_enabled():
+        _cached = None
+        return None
     try:
         emb = _SentenceTransformerEmbedder()
         # probe: actually load + encode something tiny. If the wheel/model is

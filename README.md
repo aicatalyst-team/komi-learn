@@ -107,8 +107,22 @@ If you already use Claude Code, you're **already logged in** — just install:
 
 ```bash
 pip install komi-learn        # (today: pip install -e . from this repo)
-komi-learn install            # Claude Code (default)
-komi-learn install --host codex   # OpenAI Codex CLI (second host)
+komi-learn install            # interactive setup (Claude Code; --host codex for Codex)
+```
+
+`komi-learn install` runs a short **interactive wizard** — it explains each feature
+in one sentence and asks simple yes/no questions, then does everything for you
+(including downloading the semantic-recall model if you say yes — you never type
+`pip install ...[smart]`). For scripts: `komi-learn install --yes` accepts the
+recommended defaults (community pool on, semantic recall on); `--no-wizard` uses
+flags only.
+
+**Change anything later** — you're not locked into install-time choices:
+
+```bash
+komi-learn config            # interactive menu: pool, semantic recall, cadence…
+komi-learn config set pool.repo_url ""     # or set one key directly
+komi-learn config show
 ```
 
 > **Works across agents.** The learning engine is host-agnostic — the same model,
