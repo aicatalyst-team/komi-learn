@@ -13,12 +13,10 @@ sync, no contributions leave the device.
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from dataclasses import dataclass
 
 from . import paths
+from .. import config_schema
 
 
 @dataclass
@@ -46,54 +44,14 @@ class Config:
         return str(paths.personal_root() / "pool" / "repo")
 
 
-def _coerce(value: str, like: Any) -> Any:
-    if isinstance(like, bool):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    if isinstance(like, int):
-        try: return int(value)
-        except ValueError: return like
-    if isinstance(like, float):
-        try: return float(value)
-        except ValueError: return like
-    return value
-
-
-_ENV = {
-    "KOMI_NUDGE_TURNS": "nudge_turns",
-    "KOMI_DISTILL_MODEL": "distill_model",
-    "KOMI_RECALL_K": "recall_k",
-    "KOMI_POOL_REPO_URL": "pool_repo_url",
-    "KOMI_POOL_MODE": "pool_mode",
-    "KOMI_POOL_BRANCH": "pool_branch",
-    "KOMI_POOL_REQUIRE_SIGNATURE": "pool_require_signature",
-    "KOMI_POOL_MIN_CORROBORATION": "pool_min_corroboration",
-    "KOMI_POOL_SYNC_HOURS": "pool_sync_hours",
-    "KOMI_POOL_AUTO_CONTRIBUTE": "pool_auto_contribute",
-}
-
-
 def load() -> Config:
     cfg = Config()
-    # file
+    # file (shared schema: which json keys map onto which Config attrs)
     cpath = paths.personal_root() / "config.json"
     if cpath.exists():
         try:
             data = json.loads(cpath.read_text(encoding="utf-8"))
-            pool = data.get("pool", {})
-            for k, v in {
-                "nudge_turns": data.get("nudge_turns"),
-                "distill_model": data.get("distill_model"),
-                "recall_k": data.get("recall_k"),
-                "pool_repo_url": pool.get("repo_url"),
-                "pool_mode": pool.get("mode"),
-                "pool_branch": pool.get("branch"),
-                "pool_require_signature": pool.get("require_signature"),
-                "pool_min_corroboration": pool.get("min_corroboration"),
-                "pool_sync_hours": pool.get("sync_hours"),
-                "pool_auto_contribute": pool.get("auto_contribute"),
-            }.items():
-                if v is not None:
-                    setattr(cfg, k, v)
+            config_schema.apply_file(cfg, data)
         except json.JSONDecodeError as e:
             # Don't silently run on defaults — a corrupt config that quietly
             # disables the pool is exactly the kind of "looks fine but isn't" trap
@@ -102,10 +60,8 @@ def load() -> Config:
             sys.stderr.write(f"komi-learn: config.json is invalid JSON, using defaults: {e}\n")
         except Exception:
             pass
-    # env overrides
-    for env_key, attr in _ENV.items():
-        if env_key in os.environ:
-            setattr(cfg, attr, _coerce(os.environ[env_key], getattr(cfg, attr)))
+    # env overrides (shared KOMI_* map)
+    config_schema.apply_env(cfg)
     # Loud warning: accepting unsigned pool entries is only safe for a private/test
     # pool. For a public pool it lets anyone inject unsigned learnings.
     if cfg.pool_enabled and not cfg.pool_require_signature:

@@ -109,6 +109,26 @@ def test_bogus_signature_does_not_count(tmp_path):
 # ── min_corroboration gate ───────────────────────────────────────────────────
 
 @needs_nacl
+def test_malformed_file_does_not_crash_pull(tmp_path):
+    """HIGH-1 regression: a pool envelope that parses but lacks `id` must be SKIPPED,
+    not crash the whole pull (which would silently disable all community recall)."""
+    import json as _json
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    c = Contributor(tmp_path / "k")
+    # one good learning
+    C.publish(_envelope(c, _learning(title="good", body="a fine general tip")), outbox)
+    # one malformed: learning present but NO id (would KeyError in _signing_message)
+    (outbox / "broken.json").write_text(
+        _json.dumps({"envelope": "komi.pool/1",
+                     "learning": {"type": "semantic", "title": "x", "body": "y"},
+                     "signatures": []}),
+        encoding="utf-8")
+    pulled = C.pull(outbox, require_signature=True)   # must not raise
+    assert [l.title for l in pulled] == ["good"]      # good kept, broken skipped
+
+
+@needs_nacl
 def test_pull_gate_filters_below_threshold(tmp_path):
     c1, c2 = Contributor(tmp_path / "k1"), Contributor(tmp_path / "k2")
     outbox = tmp_path / "outbox"
@@ -239,3 +259,81 @@ def test_vendored_corroboration_matches_engine(tmp_path):
     env["signatures"][1]["signature"] = "AAAA" + env["signatures"][1]["signature"][4:]
     valid2, problems2 = v.signature_problems(env)
     assert valid2 == 1 and problems2     # one still valid, but the bad one is reported
+
+
+@needs_nacl
+def test_vendored_verify_signature_matches_engine(tmp_path):
+    """Parity hole the architect flagged: the vendored verify.py re-implements
+    verify_signature independently of identity.verify_signature. Pin that they agree
+    on a matrix of {valid, wrong-key, tampered-msg, empty}."""
+    v = _load_vendored_verify()
+    from komi.pool.identity import verify_signature as eng_verify
+    c1, c2 = Contributor(tmp_path / "k1"), Contributor(tmp_path / "k2")
+    msg = b"the signed bytes"
+    sig = c1.sign(msg)
+    cases = [
+        (msg, sig, c1.public_key),          # valid
+        (msg, sig, c2.public_key),          # wrong key
+        (b"tampered", sig, c1.public_key),  # tampered message
+        (msg, "", c1.public_key),           # empty sig
+        (msg, sig, ""),                     # empty key
+    ]
+    for m, s, pk in cases:
+        assert v.verify_signature(m, s, pk) == eng_verify(m, s, pk)
+
+
+@needs_nacl
+def test_count_asymmetry_consumer_vs_ci(tmp_path):
+    """Pin the DELIBERATE asymmetry (ADR-9): when all signatures are valid, the
+    consumer's count == the CI gate's valid count. When one is invalid, the consumer
+    still ACCEPTS (counts the valid ones) while CI REPORTS A PROBLEM (fails). A
+    refactor that made the consumer strict, or the gate lenient, must break here."""
+    v = _load_vendored_verify()
+    c1, c2 = Contributor(tmp_path / "k1"), Contributor(tmp_path / "k2")
+    env = _co_sign(_envelope(c1, _learning()), c2)
+
+    # all valid: consumer count == CI valid count, CI has no problems
+    consumer = C.ingest_verify(env, require_signature=True)
+    ci_valid, ci_problems = v.signature_problems(env)
+    assert consumer.corroboration == ci_valid and not ci_problems
+
+    # one invalid: consumer still accepts (counts the 1 valid), CI flags a problem
+    env["signatures"][1]["signature"] = "AAAA" + env["signatures"][1]["signature"][4:]
+    consumer2 = C.ingest_verify(env, require_signature=True)
+    ci_valid2, ci_problems2 = v.signature_problems(env)
+    assert consumer2.accepted and consumer2.corroboration == 1   # lenient consumer
+    assert ci_valid2 == 1 and ci_problems2                       # strict CI gate
+
+
+@needs_nacl
+def test_append_only_check_blocks_signer_removal(tmp_path):
+    """The CI append-only check must reject a modified file that drops a prior signer
+    (corroboration downgrade / signer replacement), but allow adding signers."""
+    v = _load_vendored_verify()
+    c1, c2, c3 = (Contributor(tmp_path / "k1"), Contributor(tmp_path / "k2"),
+                  Contributor(tmp_path / "k3"))
+    base = _co_sign(_envelope(c1, _learning()), c2)         # 2 signers
+    grown = _co_sign(base, c3)                              # 3 signers (append)
+    downgraded = _envelope(c1, _learning())                # back to 1 signer
+
+    assert v.assert_append_only(base, grown) == []          # adding is fine
+    assert v.assert_append_only(base, base) == []           # no change is fine
+    assert v.assert_append_only(base, downgraded)           # dropping c2 → problem
+
+
+@needs_nacl
+def test_signature_flood_is_clamped_and_bounded(tmp_path):
+    """Sybil/DoS interim mitigation: a huge signatures array is bounded
+    (MAX_SIGNATURES) and the counted corroboration is clamped (MAX_COUNTED_SIGNERS)."""
+    c = Contributor(tmp_path / "k")
+    env = _envelope(c, _learning())
+    real = env["signatures"][0]
+    # pad with 5000 junk (invalid) entries + the one real signer
+    env["signatures"] = [real] + [
+        {"algo": "ed25519", "public_key": f"fakekey{i}", "signature": "AA=="} for i in range(5000)
+    ]
+    # envelope_signatures never returns more than MAX_SIGNATURES
+    assert len(corro.envelope_signatures(env)) <= corro.MAX_SIGNATURES
+    # count is clamped and only the real signer is valid here → 1
+    rep = C.ingest_verify(env, require_signature=True)
+    assert rep.corroboration <= corro.MAX_COUNTED_SIGNERS and rep.corroboration == 1

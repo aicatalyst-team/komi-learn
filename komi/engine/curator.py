@@ -38,17 +38,34 @@ DEFAULT_CONFIDENCE_FLOOR = 0.35    # below this (and unused) = prunable
 MIN_CLUSTER_SIZE = 2               # need >=2 overlapping to propose an umbrella
 
 # Cosine-similarity threshold for SEMANTIC clustering (when an embedding model is
-# available). Calibrated against the real model (all-MiniLM-L6-v2) on procedural
-# learnings:
-#   same-domain / rephrased lessons   ~0.73-0.74   (e.g. two pytest tips)
-#   related concept, different tool   ~0.37-0.48   (venv↔poetry, rg↔ag)
-#   genuinely unrelated               ≤0.09        (rg↔traceback, pytest↔css)
-# 0.45 catches same-domain + closely-related pairs while sitting ~5x above the
-# unrelated ceiling. Clustering only PROPOSES — the LLM consolidator is the real
-# gate and can decline a bad grouping (return None) — so we err toward recall here
-# rather than a high-precision cutoff. Override with KOMI_CLUSTER_THRESHOLD.
+# available). RE-CALIBRATED (precision-biased) against the real model
+# (all-MiniLM-L6-v2) on a labeled set of procedural pairs — pinned by
+# tests/test_semantic_clustering.py::test_real_model_threshold_separates_labeled_set
+# so it can't silently rot again:
+#
+#   SHOULD merge (true positives):
+#     two pytest tips (rephrased)         0.758
+#     git rebase, two phrasings           0.738
+#     venv <-> poetry (env mgmt)          0.475   # below 0.58: NOT merged (acceptable)
+#     ripgrep <-> ag (same task, diff tool) 0.368 # below 0.58: NOT merged (acceptable)
+#   SHOULD NOT merge (the costly false positives):
+#     pytest -k <-> pytest -x (distinct!) 0.548   # the FP that 0.45 wrongly merged
+#     git rebase <-> git bisect           0.400
+#     ripgrep <-> git bisect              0.334
+#     pytest <-> css                     -0.057
+#
+# Consolidation is DESTRUCTIVE (merge, then archive the siblings), so precision must
+# beat recall: a false merge folds two genuinely-distinct skills into one and archives
+# both. 0.45 (the original guess) merged the pytest -k/-x pair (distinct skills). 0.58
+# clears the worst FP (0.548) with margin and sits below the true-merge cluster
+# (0.738+). The price is missing the weak "related but different tool" merges
+# (~0.37-0.48) — exactly the borderline cases where auto-merging is debatable anyway,
+# and a consolidator can still catch the genuine ones. The earlier "recall bias / the
+# LLM is the gate" framing was wrong: the consolidator is an optional backstop, and is
+# asked to MERGE a cluster, not to adjudicate whether its members belong together.
+# Override with KOMI_CLUSTER_THRESHOLD.
 import os as _os
-DEFAULT_CLUSTER_THRESHOLD = float(_os.environ.get("KOMI_CLUSTER_THRESHOLD", "0.45"))
+DEFAULT_CLUSTER_THRESHOLD = float(_os.environ.get("KOMI_CLUSTER_THRESHOLD", "0.58"))
 
 
 @dataclass
@@ -84,8 +101,12 @@ class CurationReport:
 
 
 class ConsolidateLLM(Protocol):
-    """Optional. Given a cluster, return {title, body, trigger, tags, rationale}
-    for the merged umbrella, or None to leave the cluster alone."""
+    """Optional adjudicating gate over a proposed cluster. Given the cluster members,
+    return {title, body, trigger, tags, rationale} for a merged umbrella ONLY if they
+    are genuinely facets of one skill — or None to leave them alone. It MUST decline
+    (return None) for members that are related/same-domain but distinct skills (e.g.
+    two different pytest flags), because consolidation archives the originals. The
+    clusterer proposes on *similarity*; this gate decides on *should-they-be-one*."""
     def __call__(self, members: list[Learning]) -> Optional[dict]: ...
 
 
@@ -142,19 +163,31 @@ def _cluster_candidates(learnings: list[Learning]) -> list[Learning]:
 
 
 def cluster(learnings: list[Learning], *, embedder=None,
-            threshold: float = DEFAULT_CLUSTER_THRESHOLD) -> list[ClusterProposal]:
+            threshold: float = DEFAULT_CLUSTER_THRESHOLD,
+            vectors_by_id: Optional[dict] = None) -> list[ClusterProposal]:
     """Group procedural learnings that plausibly cover the same class of task.
 
     Semantic-first (mirrors recall): when an ``embedder`` is supplied, cluster by
-    MEANING (cosine similarity) so lessons that overlap conceptually but share no
-    title word or tag — e.g. "Prefer ripgrep over grep -r" and "Use ag for fast
-    code search" — are caught. Without an embedder (zero-dep install, or the model
-    disabled/absent) fall back to the cheap lexical signals: a shared first
-    significant title word, or a shared tag. Either way only *procedural*,
-    non-protected, active learnings are considered."""
+    MEANING (cosine similarity) so conceptually-overlapping lessons are caught even
+    if they share no title word or tag. Without an embedder (zero-dep install, or the
+    model disabled/absent) fall back to the cheap lexical signals (shared first
+    significant title word, or a shared tag). Only *procedural*, non-protected,
+    active learnings are considered either way.
+
+    ``vectors_by_id`` (optional) supplies precomputed embeddings keyed by learning id
+    — the curator passes the store's persisted vectors so we don't re-encode every
+    candidate every pass. Any candidate missing from the map is encoded on the fly;
+    if that yields a bad vector we fall back to lexical."""
     candidates = _cluster_candidates(learnings)
     if embedder is not None:
-        sem = _cluster_semantic(candidates, embedder, threshold)
+        vectors = None
+        if vectors_by_id is not None:
+            try:
+                vectors = [vectors_by_id.get(l.id) or embedder.encode(_embed_text(l))
+                           for l in candidates]
+            except Exception:
+                vectors = None
+        sem = _cluster_semantic(candidates, embedder, threshold, vectors=vectors)
         if sem is not None:
             return sem
     return _cluster_lexical(candidates)
@@ -190,44 +223,71 @@ def _embed_text(l: Learning) -> str:
     return " \n ".join(filter(None, [l.title, l.body, l.trigger, " ".join(l.tags or [])]))
 
 
-def _cluster_semantic(candidates: list[Learning], embedder,
-                      threshold: float) -> Optional[list[ClusterProposal]]:
-    """Greedy, deterministic, seed-based clustering by cosine similarity.
+def _cluster_semantic(candidates: list[Learning], embedder, threshold: float,
+                      *, vectors: Optional[list] = None) -> Optional[list[ClusterProposal]]:
+    """Greedy, deterministic clustering by cosine similarity with a MUTUAL-similarity
+    rule.
 
-    For each not-yet-clustered learning (in stable id order) we open a cluster and
-    pull in every other unclustered learning whose similarity to the SEED is
-    >= threshold. Seed-anchored (not full transitive closure) so one borderline
-    link can't chain unrelated lessons into a runaway megacluster, and so the
-    output is stable across runs. Returns None on any embedding failure so the
-    caller falls back to lexical — never raises into a curation pass."""
+    For each not-yet-clustered learning (in stable id order) we open a cluster seeded
+    by it, then admit another unclustered learning ONLY if it is >= threshold to
+    *every member already in the cluster* — not merely to the seed. This is stricter
+    than seed-anchoring: it prevents a "star" false-positive where a seed S is similar
+    to both A and B (S~A, S~B) but A and B are unrelated (A!~B) — seed-anchoring would
+    merge {S,A,B} and archive all three; mutual-similarity refuses to add B once A is
+    in (or vice-versa), keeping clusters genuinely cohesive. Still bounded (no
+    transitive chaining) and deterministic for a fixed corpus (id-sorted input).
+
+    ``vectors`` lets the caller pass precomputed embeddings (the store persists them)
+    to avoid re-encoding every candidate every pass. Returns None on any embedding
+    failure so the caller falls back to lexical — never raises into a curation pass."""
     from .embed import cosine
     try:
-        vecs: list[list[float]] = [embedder.encode(_embed_text(l)) for l in candidates]
+        vecs = vectors if vectors is not None else [embedder.encode(_embed_text(l))
+                                                    for l in candidates]
     except Exception:
         return None
-    if any(not v for v in vecs):
-        return None  # an empty vector means the model didn't really encode → fall back
+    if len(vecs) != len(candidates) or any(not v for v in vecs):
+        return None  # missing/empty vector ⇒ model didn't really encode ⇒ fall back
+
+    # Pairwise similarity matrix. Use numpy if present (vectorized, fast at scale);
+    # otherwise pure-Python cosine. Same numbers either way.
+    sim = _similarity_matrix(vecs, cosine)
 
     used = [False] * len(candidates)
     out: list[ClusterProposal] = []
     for i, seed in enumerate(candidates):
         if used[i]:
             continue
-        members = [seed]
         member_idx = [i]
         for j in range(i + 1, len(candidates)):
             if used[j]:
                 continue
-            if cosine(vecs[i], vecs[j]) >= threshold:
-                members.append(candidates[j])
+            # admit j only if it's >= threshold to EVERY current member (mutual)
+            if all(sim[j][k] >= threshold for k in member_idx):
                 member_idx.append(j)
-        if len(members) >= MIN_CLUSTER_SIZE:
+        if len(member_idx) >= MIN_CLUSTER_SIZE:
             for k in member_idx:
                 used[k] = True
-            # key = the seed's first significant title word, for a readable report
             key = next((f"w:{w}" for w in _title_words(seed)), f"sem:{seed.id[:12]}")
-            out.append(ClusterProposal(key, members))
+            out.append(ClusterProposal(key, [candidates[k] for k in member_idx]))
     return out
+
+
+def _similarity_matrix(vecs: list, cosine_fn) -> list:
+    """NxN cosine similarity. Vectorized with numpy when available (vectors from the
+    embedder are L2-normalized, so it's a single matmul); pure-Python fallback keeps
+    the engine's zero-required-dep guarantee. Returns a list-of-lists either way."""
+    try:
+        import numpy as np
+        m = np.asarray(vecs, dtype="float32")
+        # normalize defensively (mixed sources); then S = m @ m.T is cosine.
+        norms = np.linalg.norm(m, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        m = m / norms
+        return (m @ m.T).tolist()
+    except Exception:
+        n = len(vecs)
+        return [[cosine_fn(vecs[a], vecs[b]) for b in range(n)] for a in range(n)]
 
 
 def _title_words(l: Learning) -> list[str]:
@@ -293,7 +353,16 @@ def curate(
                  if l.lifecycle.state == "active"]
 
     # 2. CONSOLIDATE (LLM, optional). Cluster by meaning when a model is present.
-    rep.clusters = cluster(survivors, embedder=embedder)
+    # Reuse the store's PERSISTED embeddings (backfill any missing) instead of
+    # re-encoding every candidate every pass — recall already paid to compute them.
+    vectors_by_id = None
+    if embedder is not None:
+        try:
+            store.embed_pending(embedder)
+            vectors_by_id = store.embeddings_by_id()
+        except Exception:
+            vectors_by_id = None
+    rep.clusters = cluster(survivors, embedder=embedder, vectors_by_id=vectors_by_id)
     rep.cluster_mode = "semantic" if embedder is not None else "lexical"
     if consolidator is not None:
         for cl in rep.clusters:
@@ -396,6 +465,9 @@ def render_report(rep: CurationReport) -> str:
         lines.append("")
     if rep.clusters and not rep.consolidated:
         lines.append(f"## Clusters flagged (not merged — no LLM this run) [{rep.cluster_mode}]")
+        lines.append("(Suggestions only. These are *similar*, not necessarily one "
+                     "skill — nothing is merged or archived without the LLM "
+                     "consolidator confirming they belong together.)")
         for cl in rep.clusters:
             titles = ", ".join(m.title for m in cl.members[:5])
             lines.append(f"- `{cl.key}` ({cl.size}): {titles}")

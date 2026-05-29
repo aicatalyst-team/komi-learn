@@ -237,23 +237,26 @@ class GitHubPool:
             return []
         out: list[Learning] = []
         for md in sorted((self.cache / LEARNINGS_DIR).rglob("*.md")):
-            env = parse_md(md.read_text(encoding="utf-8", errors="replace"))
-            if env is None:
+            # Resilient per-file: one hostile/corrupt .md in the synced mirror must
+            # not crash the pull and silently disable all community recall.
+            try:
+                env = parse_md(md.read_text(encoding="utf-8", errors="replace"))
+                if env is None:
+                    continue
+                rep = ingest_verify(env, require_signature=self.cfg.require_signature)
+                if not rep.accepted or rep.corroboration < self.cfg.min_corroboration:
+                    continue
+                rec = env["learning"]
+                if categories and rec.get("category") not in categories:
+                    continue
+                lng = Learning.from_dict({**rec, "scope": "global"})
+                lng.provenance.origin = "pool"
+                lng.corroboration = max(1, rep.corroboration)
+                out.append(lng)
+                if limit and len(out) >= limit:
+                    break
+            except Exception:
                 continue
-            rep = ingest_verify(env, require_signature=self.cfg.require_signature)
-            if not rep.accepted:
-                continue
-            if rep.corroboration < self.cfg.min_corroboration:
-                continue
-            rec = env["learning"]
-            if categories and rec.get("category") not in categories:
-                continue
-            lng = Learning.from_dict({**rec, "scope": "global"})
-            lng.provenance.origin = "pool"
-            lng.corroboration = max(1, rep.corroboration)
-            out.append(lng)
-            if limit and len(out) >= limit:
-                break
         return out
 
     # ── helpers ─────────────────────────────────────────────────────────

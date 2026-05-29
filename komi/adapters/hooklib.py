@@ -35,7 +35,7 @@ def build_recall_block(paths_mod, *, cwd: str, recent_files: Optional[list[str]]
     opens the personal store, mirrors the project store + synced pool into the
     shared index, runs recall. Returns "" on any failure (never break a session)."""
     try:
-        _apply_semantic_pref(paths_mod)
+        apply_semantic_pref(paths_mod)
         from ..engine.store import Store
         from ..engine.recall import recall as _recall, RecallConfig
         personal = Store(paths_mod.personal_root(), index_path=paths_mod.index_path())
@@ -49,9 +49,12 @@ def build_recall_block(paths_mod, *, cwd: str, recent_files: Optional[list[str]]
         return ""
 
 
-def _apply_semantic_pref(paths_mod) -> None:
+def apply_semantic_pref(paths_mod) -> None:
     """Export the user's recall.semantic preference to KOMI_SEMANTIC so the
-    host-agnostic engine honors 'semantic off' even when the model is installed."""
+    host-agnostic engine honors 'semantic off' even when the model is installed.
+
+    A supported cross-module entry point (the curate worker calls it too — it's a
+    fresh process that didn't see the recall hook's env export)."""
     try:
         import json as _json
         import os as _os
@@ -66,6 +69,10 @@ def _apply_semantic_pref(paths_mod) -> None:
             embed._reset_cache_for_tests()   # re-resolve with the new pref
     except Exception:
         pass
+
+
+# Back-compat alias (was private). Kept so existing callers/tests don't break.
+_apply_semantic_pref = apply_semantic_pref
 
 
 def _mirror_pool(paths_mod, personal) -> None:
@@ -192,5 +199,5 @@ def emit_session_context(block: str) -> int:
 __all__ = [
     "build_recall_block", "should_distill", "spawn_distill_worker",
     "run_distill_worker", "read_stdin_json", "emit", "emit_continue",
-    "emit_session_context",
+    "emit_session_context", "apply_semantic_pref",
 ]

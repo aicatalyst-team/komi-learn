@@ -43,9 +43,13 @@ def _signing_message(publishable: dict, *, signer_public_key: str = "") -> bytes
     a valid signature being replayed under a different identity. Everything that
     affects trust must be inside the signature."""
     prov = publishable.get("provenance", {})
+    # Never hard-subscript producer-controlled data: a pool file with a `learning`
+    # object that parses but lacks `id` (or any content field) must produce a
+    # verification FAILURE, not a KeyError that crashes the whole pull. .get() makes
+    # a missing id an empty string → the signature won't match → it simply doesn't count.
     root = {
-        "id": publishable["id"],
-        "content": {k: publishable[k] for k in
+        "id": publishable.get("id", ""),
+        "content": {k: publishable.get(k) for k in
                     ("schema", "type", "category", "title", "body", "trigger", "tags")},
         "parent_ids": prov.get("parent_ids", []),
         "origin": prov.get("origin", ""),
@@ -204,22 +208,23 @@ def pull(
         return []
     out: list[Learning] = []
     for f in sorted(d.glob("*.json")):
+        # One hostile/corrupt file must NEVER sink the whole pull — wrap the entire
+        # per-file body so a single bad entry is skipped, not fatal. (A crash here
+        # would silently disable ALL community recall for the user.)
         try:
             env = json.loads(f.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+            rep = ingest_verify(env, require_signature=require_signature)
+            if not rep.accepted or rep.corroboration < min_corroboration:
+                continue
+            rec = env["learning"]
+            if categories and rec.get("category") not in categories:
+                continue
+            lng = Learning.from_dict({**rec, "scope": "global"})
+            lng.provenance.origin = "pool"
+            lng.corroboration = max(1, rep.corroboration)
+            out.append(lng)
+        except Exception:
             continue
-        rep = ingest_verify(env, require_signature=require_signature)
-        if not rep.accepted:
-            continue
-        if rep.corroboration < min_corroboration:
-            continue
-        rec = env["learning"]
-        if categories and rec.get("category") not in categories:
-            continue
-        lng = Learning.from_dict({**rec, "scope": "global"})
-        lng.provenance.origin = "pool"
-        lng.corroboration = max(1, rep.corroboration)
-        out.append(lng)
     return out
 
 

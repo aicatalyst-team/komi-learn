@@ -102,9 +102,15 @@ def render_md(envelope: dict) -> str:
     return "\n".join(lines)
 
 
+# A pool learning is a short lesson; its verifiable JSON block is a few KB even with
+# a handful of signatures. Refuse to parse an oversized block so a padded file (e.g.
+# a giant signatures array, or junk) can't drive a CPU/parse DoS on every puller.
+MAX_BLOCK_CHARS = 64 * 1024
+
+
 def parse_md(text: str) -> Optional[dict]:
-    """Extract the envelope dict from a pool `.md` file. Returns None if absent
-    or malformed (caller treats that as 'skip this file')."""
+    """Extract the envelope dict from a pool `.md` file. Returns None if absent,
+    oversized, or malformed (caller treats that as 'skip this file')."""
     start = text.find(f"```{_FENCE}")
     if start == -1:
         return None
@@ -112,6 +118,8 @@ def parse_md(text: str) -> Optional[dict]:
     end = text.find("```", start)
     if end == -1:
         return None
+    if end - start > MAX_BLOCK_CHARS:
+        return None   # anti-DoS: oversized verifiable block
     try:
         obj = json.loads(text[start:end])
     except json.JSONDecodeError:

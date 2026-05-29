@@ -91,7 +91,7 @@ def _signing_message(rec: dict, signer_public_key: str = "") -> bytes:
     # MUST mirror komi/pool/contribute.py::_signing_message exactly.
     prov = rec.get("provenance", {})
     root = {
-        "id": rec["id"],
+        "id": rec.get("id", ""),   # .get not subscript: a missing id must fail verify, not crash
         "content": {k: rec.get(k) for k in
                     ("schema", "type", "category", "title", "body", "trigger", "tags")},
         "parent_ids": prov.get("parent_ids", []),
@@ -114,15 +114,21 @@ def verify_signature(message: bytes, signature_b64: str, public_key_b64: str) ->
 
 
 # ── corroboration (mirror of komi/pool/corroboration.py) ────────────────────
-# MUST mirror that module: how distinct endorsers are extracted + counted.
+# MUST mirror that module: how distinct endorsers are extracted + counted, AND the
+# two safety bounds (array cap + counted-signer clamp). Keys are free to mint, so a
+# distinct-key count is Sybil-forgeable — the clamp keeps a flood from inflating it.
+MAX_SIGNATURES = 64        # mirror corroboration.MAX_SIGNATURES (anti-DoS array cap)
+MAX_COUNTED_SIGNERS = 3    # mirror corroboration.MAX_COUNTED_SIGNERS (anti-Sybil clamp)
+
 
 def envelope_signatures(envelope: dict) -> list:
     """Normalize to [{algo, public_key, signature}], handling both the new
-    ``signatures`` array and the legacy single-``signer`` shape. De-dupes by key."""
+    ``signatures`` array and the legacy single-``signer`` shape. De-dupes by key.
+    Bounded to MAX_SIGNATURES entries (anti-flood; mirrors the engine)."""
     out, seen = [], set()
     raw = envelope.get("signatures")
     if isinstance(raw, list) and raw:
-        for s in raw:
+        for s in raw[:MAX_SIGNATURES]:
             if not isinstance(s, dict):
                 continue
             pk = s.get("public_key") or ""
@@ -140,10 +146,29 @@ def envelope_signatures(envelope: dict) -> list:
     return out
 
 
+def assert_append_only(old_env: dict, new_env: dict) -> list:
+    """Corroboration may only GROW. Given the BASE version of a modified learning
+    file and the NEW version, the new signer set must be a SUPERSET of the old —
+    otherwise the PR is dropping/replacing prior endorsers (a corroboration
+    downgrade or signer-replacement), which CI must reject. (CI verifies each file
+    in isolation otherwise, so without this a hostile PR could strip signers and
+    still pass.) Returns a list of problems (empty = OK)."""
+    old = {s["public_key"] for s in envelope_signatures(old_env)}
+    new = {s["public_key"] for s in envelope_signatures(new_env)}
+    removed = old - new
+    if removed:
+        return [f"signers removed (corroboration may only grow): "
+                f"{sorted(k[:12] + '…' for k in removed)}"]
+    return []
+
+
 def signature_problems(envelope: dict) -> tuple:
-    """Return (num_valid_distinct_signers, [problems]). EVERY claimed signature
-    must verify — a signature that's present but invalid is a hard failure (the
-    pool must never carry a bogus signature), even if other signers are valid."""
+    """Return (counted_valid_signers, [problems]). EVERY claimed signature must
+    verify — a present-but-invalid signature is a hard failure (the pool must never
+    carry a bogus signature), even if other signers are valid. So unlike the engine's
+    lenient consumer path, CI keeps checking ALL inspected signatures and reports each
+    invalid one. The returned *count* is clamped to MAX_COUNTED_SIGNERS to stay in
+    parity with the engine's count_corroboration."""
     learning = envelope.get("learning", {})
     sigs = envelope_signatures(envelope)
     if not sigs:
@@ -160,7 +185,7 @@ def signature_problems(envelope: dict) -> tuple:
             problems.append(f"signature for signer {pk[:12]}… is invalid")
     if valid == 0 and not problems:
         problems.append("no valid signature")
-    return valid, problems
+    return min(valid, MAX_COUNTED_SIGNERS), problems
 
 
 # ── safety scrub (mirror of komi/engine/classify.py detectors) ──────────────
@@ -223,6 +248,9 @@ def scrub_problems(text: str) -> list[str]:
 
 # ── .md parsing + path (mirror of komi/pool/repo_format.py) ──────────────────
 
+MAX_BLOCK_CHARS = 64 * 1024   # mirror repo_format.MAX_BLOCK_CHARS (anti-DoS)
+
+
 def parse_md(text: str):
     start = text.find("```komi")
     if start == -1:
@@ -230,6 +258,8 @@ def parse_md(text: str):
     start = text.find("\n", start) + 1
     end = text.find("```", start)
     if end == -1:
+        return None
+    if end - start > MAX_BLOCK_CHARS:
         return None
     try:
         obj = json.loads(text[start:end])
@@ -286,7 +316,42 @@ def check_file(path: Path, *, require_signature: bool, repo_root: Path) -> list[
     return problems
 
 
+def _append_only_mode(argv: list[str]) -> int:
+    """`--append-only BASE.md NEW.md [BASE2.md NEW2.md ...]`: for each (base, new)
+    pair, assert the new file's signer set is a superset of the base's. A base path
+    of '-' or a missing file means the learning is newly ADDED (no prior signers to
+    preserve) → always OK."""
+    pairs = argv[1:]
+    if len(pairs) % 2 != 0:
+        print("komi-pool verify: --append-only needs BASE NEW pairs")
+        return 2
+    problems = []
+    for i in range(0, len(pairs), 2):
+        base_p, new_p = pairs[i], pairs[i + 1]
+        new_env = parse_md(Path(new_p).read_text(encoding="utf-8", errors="replace"))
+        if new_env is None:
+            problems.append(f"{new_p}: unparseable")
+            continue
+        if base_p == "-" or not Path(base_p).exists():
+            continue  # newly added file — nothing to preserve
+        old_env = parse_md(Path(base_p).read_text(encoding="utf-8", errors="replace"))
+        if old_env is None:
+            continue  # base wasn't a valid learning (e.g. brand new path)
+        for p in assert_append_only(old_env, new_env):
+            problems.append(f"{new_p}: {p}")
+    if problems:
+        print(f"komi-pool verify (append-only): FAILED ({len(problems)}):")
+        for p in problems:
+            print(f"  x {p}")
+        return 1
+    print("komi-pool verify (append-only): OK")
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "--append-only":
+        return _append_only_mode(argv)
+
     require_sig = "--no-signature" not in argv
     argv = [a for a in argv if a != "--no-signature"]
     repo_root = Path.cwd()

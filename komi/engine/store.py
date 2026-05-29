@@ -85,7 +85,17 @@ class Store:
                 out.append(rec)
         return out
 
+    @staticmethod
+    def _md_payload(rec: dict) -> dict:
+        """Strip computed/transient fields before writing a record into Markdown (the
+        source of truth). ``corroboration`` is a pull-time trust signal derived from
+        pool signatures — it is NEVER content and must not be frozen into a local file,
+        where it would go stale and (if later trusted) spoof a trust level. Recomputed
+        on every pull; defaults to 1 for local learnings."""
+        return {k: v for k, v in rec.items() if k != "corroboration"}
+
     def _render_entry(self, rec: dict) -> str:
+        rec = self._md_payload(rec)
         title = (rec.get("title") or "").strip()
         body = (rec.get("body") or "").strip()
         lid = rec.get("id", "")
@@ -197,9 +207,10 @@ class Store:
             "tags": list(lng.tags),
         }
         import json as _json
+        skill_rec = self._md_payload(lng.to_dict())   # drop transient corroboration
         front = "\n".join(f"{k}: {_json.dumps(v) if isinstance(v, (list, dict)) else v}"
                           for k, v in fm.items())
-        payload = _json.dumps(lng.to_dict(), ensure_ascii=False, indent=2)
+        payload = _json.dumps(skill_rec, ensure_ascii=False, indent=2)
         return (
             f"---\n{front}\n---\n\n"
             f"# {lng.title}\n\n"
@@ -283,15 +294,26 @@ class Store:
             pass
         db.executescript(
             """
+            -- Row identity is (id, origin_root), NOT id alone. The index is shared
+            -- across origins ("one brain": personal + project + each external mirror,
+            -- namespaced by origin_root). The SAME content-addressed id can therefore
+            -- legitimately appear once per origin — e.g. a lesson the user distilled
+            -- locally (origin=local root) AND the same lesson pulled from the pool
+            -- (origin='external:pool', carrying scope=global + a corroboration count).
+            -- A single-column PK on id collapsed these: mirroring the pool copy would
+            -- overwrite the local row's scope/origin_root, and the next pool sync's
+            -- scoped DELETE would then evict the user's own learning. UNIQUE(id,
+            -- origin_root) keeps them as distinct rows; recall dedups by id in Python.
             CREATE TABLE IF NOT EXISTS learnings (
-                id TEXT PRIMARY KEY,
+                id TEXT,
                 type TEXT, scope TEXT, category TEXT,
                 title TEXT, body TEXT, trigger TEXT, tags TEXT,
                 confidence REAL, reused INTEGER DEFAULT 0,
                 last_used TEXT, state TEXT DEFAULT 'active',
                 source TEXT, origin_root TEXT, updated_at TEXT,
                 embedding BLOB, embed_version TEXT,
-                corroboration INTEGER DEFAULT 1
+                corroboration INTEGER DEFAULT 1,
+                UNIQUE(id, origin_root)
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS learnings_fts USING fts5(
                 title, body, trigger, tags,
@@ -323,7 +345,83 @@ class Store:
         if "corroboration" not in cols:
             db.execute("ALTER TABLE learnings ADD COLUMN corroboration INTEGER DEFAULT 1")
         db.commit()
+        Store._migrate_row_identity(db)
         return db
+
+    @staticmethod
+    def _migrate_row_identity(db: sqlite3.Connection) -> None:
+        """Migrate legacy index.db files whose `learnings` table had a single-column
+        PRIMARY KEY on `id` to the (id, origin_root) identity. SQLite can't ALTER a
+        primary key, so we rebuild the table. The derived index can always be
+        regenerated from Markdown, so this is safe even if the copy is lossy — but we
+        preserve rows (incl. DB-only telemetry + embeddings) to avoid a needless
+        re-embed/re-sync. Idempotent: a no-op once the table already has the
+        UNIQUE(id, origin_root) shape. FTS triggers key on rowid, untouched here."""
+        try:
+            row = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='learnings'"
+            ).fetchone()
+            sql = (row[0] if row else "") or ""
+            # Old shape had "id TEXT PRIMARY KEY"; new shape has UNIQUE(id, origin_root).
+            if "PRIMARY KEY" not in sql.upper():
+                return  # already migrated (or fresh table)
+
+            db.execute("PRAGMA foreign_keys=OFF")
+            db.executescript(
+                """
+                BEGIN;
+                DROP TRIGGER IF EXISTS learnings_ai;
+                DROP TRIGGER IF EXISTS learnings_ad;
+                DROP TRIGGER IF EXISTS learnings_au;
+                ALTER TABLE learnings RENAME TO learnings_old;
+                CREATE TABLE learnings (
+                    id TEXT,
+                    type TEXT, scope TEXT, category TEXT,
+                    title TEXT, body TEXT, trigger TEXT, tags TEXT,
+                    confidence REAL, reused INTEGER DEFAULT 0,
+                    last_used TEXT, state TEXT DEFAULT 'active',
+                    source TEXT, origin_root TEXT, updated_at TEXT,
+                    embedding BLOB, embed_version TEXT,
+                    corroboration INTEGER DEFAULT 1,
+                    UNIQUE(id, origin_root)
+                );
+                INSERT OR IGNORE INTO learnings
+                    (id, type, scope, category, title, body, trigger, tags, confidence,
+                     reused, last_used, state, source, origin_root, updated_at,
+                     embedding, embed_version, corroboration)
+                SELECT id, type, scope, category, title, body, trigger, tags, confidence,
+                     reused, last_used, state, source, origin_root, updated_at,
+                     embedding, embed_version, corroboration
+                FROM learnings_old;
+                DROP TABLE learnings_old;
+                -- rebuild the FTS shadow + triggers (rowids changed on copy)
+                INSERT INTO learnings_fts(learnings_fts) VALUES('delete-all');
+                INSERT INTO learnings_fts(rowid, title, body, trigger, tags)
+                    SELECT rowid, title, body, trigger, tags FROM learnings;
+                CREATE TRIGGER IF NOT EXISTS learnings_ai AFTER INSERT ON learnings BEGIN
+                    INSERT INTO learnings_fts(rowid, title, body, trigger, tags)
+                    VALUES (new.rowid, new.title, new.body, new.trigger, new.tags);
+                END;
+                CREATE TRIGGER IF NOT EXISTS learnings_ad AFTER DELETE ON learnings BEGIN
+                    INSERT INTO learnings_fts(learnings_fts, rowid, title, body, trigger, tags)
+                    VALUES ('delete', old.rowid, old.title, old.body, old.trigger, old.tags);
+                END;
+                CREATE TRIGGER IF NOT EXISTS learnings_au AFTER UPDATE ON learnings BEGIN
+                    INSERT INTO learnings_fts(learnings_fts, rowid, title, body, trigger, tags)
+                    VALUES ('delete', old.rowid, old.title, old.body, old.trigger, old.tags);
+                    INSERT INTO learnings_fts(rowid, title, body, trigger, tags)
+                    VALUES (new.rowid, new.title, new.body, new.trigger, new.tags);
+                END;
+                COMMIT;
+                """
+            )
+        except Exception:
+            # Never let a migration failure brick the index — it's derived and can be
+            # rebuilt from Markdown via reindex(). Roll back a partial migration.
+            try:
+                db.execute("ROLLBACK")
+            except Exception:
+                pass
 
     # ── embeddings (semantic recall) ────────────────────────────────────
 
@@ -399,11 +497,11 @@ class Store:
             VALUES (:id,:type,:scope,:category,:title,:body,:trigger,:tags,
                     :confidence,:reused,:last_used,:state,:source,:origin_root,:updated_at,
                     :corroboration)
-            ON CONFLICT(id) DO UPDATE SET
+            ON CONFLICT(id, origin_root) DO UPDATE SET
                 scope=excluded.scope, category=excluded.category, title=excluded.title,
                 body=excluded.body, trigger=excluded.trigger, tags=excluded.tags,
                 confidence=excluded.confidence, state=excluded.state,
-                source=excluded.source, origin_root=excluded.origin_root,
+                source=excluded.source,
                 updated_at=excluded.updated_at, corroboration=excluded.corroboration
             """,
             {
@@ -502,6 +600,23 @@ class Store:
             self._db.commit()
         except Exception:
             pass
+
+    def embeddings_by_id(self) -> dict:
+        """Map of learning id → its persisted embedding (unpacked), for active rows
+        that have one. Lets the curator reuse vectors recall already computed instead
+        of re-encoding every candidate. If the same id exists under multiple origins
+        (local + pool), either copy's vector is fine — the content (hence embedding)
+        is identical by content-addressing."""
+        out: dict = {}
+        try:
+            for r in self._db.execute(
+                "SELECT id, embedding FROM learnings WHERE state='active' AND embedding IS NOT NULL"
+            ):
+                if r["id"] not in out:
+                    out[r["id"]] = self._unpack_vec(r["embedding"])
+        except Exception:
+            pass
+        return out
 
     def mirror_external(self, learnings: Iterable[Learning], *, source: str) -> int:
         """Index externally-sourced learnings (e.g. the synced global pool) WITHOUT

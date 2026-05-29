@@ -185,7 +185,12 @@ class Learning:
         # produce a Learning whose id later diverges from the clean copy.
         if isinstance(d.get("tags"), list):
             d["tags"] = [t for t in d["tags"] if isinstance(t, str) and t.strip()]
-        allowed_top = set(cls.__dataclass_fields__)  # type: ignore[attr-defined]
+        # ``corroboration`` is a COMPUTED trust signal, never content. Refuse to
+        # deserialize it from a record — a pool file (or hand-edited local file)
+        # claiming ``corroboration: 999`` must NOT be believed. Whoever legitimately
+        # knows the count (the pull path) sets it explicitly AFTER from_dict from the
+        # re-verified signer count. Defaults to 1 here.
+        allowed_top = set(cls.__dataclass_fields__) - {"corroboration"}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in d.items() if k in allowed_top})
 
     def publishable(self) -> dict[str, Any]:

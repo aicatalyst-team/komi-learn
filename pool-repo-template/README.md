@@ -40,6 +40,23 @@ Every file carries a verifiable record (a fenced ` ```komi ` block):
 You don't write these by hand — komi-learn prepares, scrubs, signs, and opens the
 PR for you after **you approve** the learning locally. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Operating this pool (maintainers)
+
+CI verifies each file, but a Git repo's integrity ultimately rests on **who can
+merge**. Before accepting public contributions, harden the repo:
+
+1. **Require review** — [`CODEOWNERS`](CODEOWNERS) already routes `learnings/**` and
+   `.github/**` to maintainers; replace `@kurikomi-labs` with your team.
+2. **Enable branch protection** on `main` (Settings → Branches → Add rule):
+   require pull requests, require the **Verify learnings** status check to pass,
+   require CODEOWNERS review, and disallow force-pushes/deletions. Without this,
+   CI is advisory — someone with push access could bypass it.
+3. **Why it matters:** CI checks each file *in isolation*. The append-only check
+   (signatures may only be added, never removed) and every other gate only protect
+   the pool if changes *must* go through a reviewed, CI-gated PR. Corroboration is a
+   soft, clamped hint regardless — see [CONTRIBUTING.md](CONTRIBUTING.md) — but
+   branch protection is what stops a downgrade or a bogus file from being force-merged.
+
 ## License
 
 Learnings are contributed under [CC0-1.0](LICENSE) (public domain) so anyone can

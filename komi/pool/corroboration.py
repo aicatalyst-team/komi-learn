@@ -22,11 +22,37 @@ corroboration would fork the very files it's meant to merge.
 This module is the single source of truth for "extract the distinct valid
 signers from an envelope". The vendored CI verifier mirrors this logic; a parity
 test guards the two against drift.
+
+⚠️ Trust limitation (read before relying on the count). A contributor key is an
+Ed25519 keypair generated locally for free — it is NOT bound to any real-world or
+GitHub identity. So "N distinct public keys" is a proxy for "N independent people"
+that a single attacker can defeat by minting N keys and signing the same content
+under each (a Sybil attack). Until signer↔account binding exists (planned: enforce
+it at the pool's CI boundary, Phase 7), corroboration is treated as a *soft,
+advisory* signal, NOT a hard trust gate:
+  • the counted value is CLAMPED to ``MAX_COUNTED_SIGNERS`` so a flood of fake keys
+    cannot manufacture a runaway "×50 experts agree" cue, and
+  • recall only ever *down-weights/filters* on corroboration, never *admits*
+    untrusted content it would otherwise exclude.
+See docs/05-adr-log.md ADR-9.
 """
 
 from __future__ import annotations
 
 from typing import Callable, Optional
+
+# Hard upper bound on signature-array entries we will even look at. A real learning
+# accrues a handful of independent endorsers; thousands is either abuse or a DoS
+# (each entry forces an Ed25519 verify). Bounding here protects every consumer AND
+# the CI verifier (mirrored in verify.py). Generous for legitimate use, lethal to a flood.
+MAX_SIGNATURES = 64
+
+# Cap on the corroboration level we will COUNT/report. Because keys are free to mint
+# (see the trust-limitation note above), more signatures past a small number is not
+# more evidence of independence — so we refuse to count it as such. 3 distinct valid
+# signers is plenty to mark a lesson "independently corroborated"; beyond that adds no
+# trust until real identity binding lands. Mirrored in verify.py.
+MAX_COUNTED_SIGNERS = 3
 
 
 def envelope_signatures(envelope: dict) -> list[dict]:
@@ -49,7 +75,9 @@ def envelope_signatures(envelope: dict) -> list[dict]:
 
     raw = envelope.get("signatures")
     if isinstance(raw, list) and raw:
-        for s in raw:
+        # Bound the work: only inspect the first MAX_SIGNATURES entries so a padded
+        # array can't turn signature verification into a CPU-DoS (anti-flood).
+        for s in raw[:MAX_SIGNATURES]:
             if not isinstance(s, dict):
                 continue
             pk = s.get("public_key") or ""
@@ -90,7 +118,12 @@ def count_corroboration(
     A signature that doesn't verify (wrong key, tampered content, unsigned)
     simply doesn't count — it can't drag the level down, but it can't pad it up
     either. Distinctness is by public key (already de-duped by
-    :func:`envelope_signatures`)."""
+    :func:`envelope_signatures`).
+
+    The result is CLAMPED to :data:`MAX_COUNTED_SIGNERS`: because keys are free to
+    mint, counting past a small number would let a Sybil flood fabricate trust (see
+    the module docstring). We stop verifying once the clamp is reached — also a
+    short-circuit that bounds work."""
     learning = envelope.get("learning", {})
     n = 0
     for s in envelope_signatures(envelope):
@@ -99,6 +132,8 @@ def count_corroboration(
             continue
         if verify(sign_message(learning, pk), sig, pk):
             n += 1
+            if n >= MAX_COUNTED_SIGNERS:
+                break
     return n
 
 
@@ -135,4 +170,5 @@ def merge_signature(envelope: dict, new_sig: dict) -> Optional[dict]:
     return merged
 
 
-__all__ = ["envelope_signatures", "count_corroboration", "merge_signature"]
+__all__ = ["envelope_signatures", "count_corroboration", "merge_signature",
+           "MAX_SIGNATURES", "MAX_COUNTED_SIGNERS"]

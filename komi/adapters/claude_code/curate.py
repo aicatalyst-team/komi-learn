@@ -30,8 +30,8 @@ def run_curate(*, cwd: str = "", dry_run: bool = False, use_llm: bool = True):
     # worker is a fresh process that didn't see the recall hook's env export, so
     # without this a user who disabled semantic would still get semantic clustering.
     try:
-        from ..hooklib import _apply_semantic_pref
-        _apply_semantic_pref(paths)
+        from ..hooklib import apply_semantic_pref
+        apply_semantic_pref(paths)
     except Exception:
         pass
 

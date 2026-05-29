@@ -173,3 +173,95 @@ def test_curate_reports_lexical_mode_without_embedder(tmp_path, monkeypatch):
 def test_default_threshold_is_sane():
     # guard the calibrated default: between the unrelated ceiling and 1.0
     assert 0.2 < DEFAULT_CLUSTER_THRESHOLD < 0.9
+
+
+# ── mutual-similarity rule (no star-cluster false positives) ─────────────────
+
+class StarEmbedder:
+    """Three items where the SEED is similar to A and to B, but A and B are NOT
+    similar to each other. Seed-anchored clustering would wrongly merge all three
+    (and archive them); mutual-similarity must refuse to put A and B together."""
+    version = "star/1"
+    dim = 3
+    _V = {  # near-orthogonal A & B; seed sits between them, ~0.7 to each
+        "seed": [0.7071, 0.7071, 0.0],
+        "a":    [1.0, 0.0, 0.0],
+        "b":    [0.0, 1.0, 0.0],
+    }
+
+    def encode(self, text):
+        t = (text or "").lower()
+        for k, v in self._V.items():
+            if k in t:
+                return list(v)
+        return [0.0, 0.0, 1.0]
+
+
+def test_mutual_similarity_blocks_star_false_positive():
+    seed = P("seed item", "seed", "x", [])
+    a = P("a item", "a", "x", [])
+    b = P("b item", "b", "x", [])
+    # seed~a ≈ seed~b ≈ 0.707 (≥ a 0.58 threshold) but a~b = 0 (< threshold)
+    clusters = cluster([seed, a, b], embedder=StarEmbedder(), threshold=0.58)
+    # mutual-similarity: seed pairs with whichever comes first by id, but a+b can't
+    # both join (they're orthogonal). So no cluster contains all three.
+    for c in clusters:
+        ids = {m.id for m in c.members}
+        assert not ({a.id, b.id} <= ids), "star FP: orthogonal a & b merged together"
+
+
+# ── real-model eval (the regression guard the miscalibration needed) ─────────
+
+@pytest.mark.skipif(not embed_mod.available(),
+                    reason="real embedding model not installed (smart extra)")
+def test_real_model_threshold_separates_labeled_set():
+    """Pins the threshold against the REAL model on a labeled set of procedural
+    pairs. This is the test the original 0.45 miscalibration was missing: the mock
+    embedder cannot exhibit the real failure (distinct same-domain skills scoring
+    high). If the model or the chosen threshold drifts so that a SHOULD-NOT-MERGE
+    pair would cluster (or an easy SHOULD-MERGE pair wouldn't), this fails loudly.
+
+    Labeled, with measured cosines (all-MiniLM-L6-v2, curator's _embed_text join):
+      SHOULD merge:    two pytest tips 0.76, git rebase rephrased 0.74
+      SHOULD NOT merge: pytest -k vs -x 0.55, rg vs git-bisect ~0.33, pytest vs css <0
+    The weak "different tool, same task" pairs (rg/ag 0.37, venv/poetry 0.47) are
+    intentionally NOT asserted as merges — precision bias accepts missing them.
+    """
+    from komi.engine import embed
+    from komi.engine.curator import _embed_text, DEFAULT_CLUSTER_THRESHOLD
+    th = DEFAULT_CLUSTER_THRESHOLD
+
+    def cos(a, b):
+        return embed.cosine(embed.get_embedder().encode(_embed_text(a)),
+                            embed.get_embedder().encode(_embed_text(b)))
+
+    should_merge = [
+        (P("Run only failed tests", "pytest --lf reruns last failures fast.",
+           "rerunning tests", ["pytest"]),
+         P("Stop at first failure", "pytest -x halts on the first failing test.",
+           "debugging a failing suite", ["pytest"])),
+        (P("Rebase to keep history linear", "git rebase main avoids merge commits.",
+           "integrating a branch", ["git"]),
+         P("Prefer rebase over merge", "rebasing keeps a clean linear log.",
+           "updating a feature branch", ["git"])),
+    ]
+    must_not_merge = [
+        (P("Filter tests by name", "pytest -k EXPR selects tests matching a substring.",
+           "running a subset of tests", ["pytest"]),
+         P("Stop at first failure", "pytest -x halts on the first failing test.",
+           "debugging a failing suite", ["pytest"])),
+        (P("Prefer ripgrep over grep -r", "rg is faster on big trees.",
+           "code search", ["ripgrep"]),
+         P("Find a regression with git bisect", "git bisect binary-searches commits.",
+           "locating a regression", ["git"])),
+        (P("Run only failed tests", "pytest --lf reruns failures.",
+           "rerunning tests", ["pytest"]),
+         P("Use flexbox for layout", "display:flex aligns items easily.",
+           "laying out a page", ["css"])),
+    ]
+    # every clear should-merge pair is at/above threshold
+    for a, b in should_merge:
+        assert cos(a, b) >= th, f"regression: {a.title!r}~{b.title!r}={cos(a,b):.3f} < {th}"
+    # no should-not-merge pair reaches threshold (the costly false positives)
+    for a, b in must_not_merge:
+        assert cos(a, b) < th, f"FALSE MERGE risk: {a.title!r}~{b.title!r}={cos(a,b):.3f} >= {th}"

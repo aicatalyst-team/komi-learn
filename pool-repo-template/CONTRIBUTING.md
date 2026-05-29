@@ -56,7 +56,16 @@ signer signs a message binding their *own* public key, so the count of distinct
 valid signatures is a real measure of independent agreement — it can't be faked by
 replaying one signature.
 
-A learning endorsed by more independent signers is **weighted higher** when agents
-pull it, and consumers can require a minimum — `komi-learn config set
-pool.min_corroboration 2` pulls only lessons several people arrived at
-independently. (The default is 1 while the pool is young.)
+A learning endorsed by more distinct signers is **weighted (a little) higher** when
+agents pull it, and consumers can require a minimum — `komi-learn config set
+pool.min_corroboration 2` pulls only lessons more than one key signed. (The default
+is 1 while the pool is young.)
+
+**⚠️ Corroboration is a soft hint, not proof.** A signing key is generated locally
+for free and isn't yet bound to a GitHub account, so a determined actor can sign the
+same lesson under several keys they own (a Sybil attack) to inflate the count. To
+keep that from manufacturing false confidence, komi-learn **clamps the counted
+corroboration to a small number (3)** and treats it as advisory only — it never lets
+a high count *admit* a learning that would otherwise be filtered, and the agent is
+told `×N` is a weak hint, not a verified endorsement. Binding signatures to
+established GitHub accounts at CI is planned; until then, don't over-trust the count.

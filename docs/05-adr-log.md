@@ -108,7 +108,7 @@ signs a message binding their own pubkey (so signatures can't be replayed under
 another identity — ADR re: signing scheme). But the same lesson must hash
 *identically* regardless of how many have signed it — otherwise corroboration would
 fork the very files it's meant to merge.
-**Trade-off.** Gain: a trust gate (`pool.min_corroboration`) + a recall ranking
+**Trade-off.** Gain: a trust *hint* (`pool.min_corroboration`) + a recall ranking
 nudge, with **zero new dependencies** and no id churn; old files and the live pool
 stay valid. Give up: the count is recomputed on every pull (cheap) rather than
 stored in the content; a signing-scheme change still invalidates signatures and
@@ -116,3 +116,20 @@ needs a re-sign pass (`resign_seeds.py`) — corroboration doesn't change that.
 **Reversibility.** Easy — the array is additive; drop the bonus/gate and the system
 reverts to binary verified/not. The authoritative-array rule is what keeps the
 identity-swap defense intact (legacy-field tampering is ignored; parity-tested).
+
+**⚠️ Known limitation — distinct key ≠ distinct person (Sybil).** A contributor key
+is an Ed25519 keypair generated locally for free; nothing binds it to a real-world
+or GitHub identity. So "N distinct valid signers" is only a *proxy* for "N
+independent people", and a single attacker can defeat it by minting N keys and
+signing the same content under each — fabricating a high corroboration count. This
+was flagged in the 3-persona security review (Critical). **Interim mitigation
+(shipped):** corroboration is a *soft, advisory* signal, never a hard trust gate —
+(a) the counted/displayed value is **clamped to `MAX_COUNTED_SIGNERS` (3)** in
+`count_corroboration` (mirrored in the CI verifier), so a key flood can't manufacture
+a runaway "×50 agree" cue; (b) recall only ever *filters/down-weights* on
+corroboration, never *admits* untrusted content it would otherwise exclude; (c) the
+recall bonus is bounded (≈0.11 max). **Proper fix (deferred to Phase 7):** bind each
+signature to an established GitHub account at the pool's CI boundary (account
+age/contribution heuristics + stored attestation), moving the Sybil cost to "create
+N aged GitHub accounts". Until then, the `[community ×N]` cue is framed to the model
+as a weak hint, not an identity-verified endorsement.

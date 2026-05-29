@@ -49,6 +49,27 @@ jobs:
             python .github/scripts/verify.py --changed ${{ steps.changed.outputs.files }}
           fi
 
+      - name: Enforce append-only signatures (no corroboration downgrade)
+        if: github.event_name == 'pull_request'
+        run: |
+          # For every changed learning file, compare its signer set against the base
+          # version: signatures may only be ADDED, never removed/replaced. A newly
+          # added file has no base (git show fails) → treated as OK ('-' sentinel).
+          BASE="${{ github.event.pull_request.base.sha }}"
+          PAIRS=""
+          mkdir -p "$RUNNER_TEMP/base"
+          for f in ${{ steps.changed.outputs.files }}; do
+            safe=$(echo "$f" | tr '/' '_')
+            if git show "$BASE:$f" > "$RUNNER_TEMP/base/$safe" 2>/dev/null; then
+              PAIRS="$PAIRS $RUNNER_TEMP/base/$safe $f"
+            else
+              PAIRS="$PAIRS - $f"
+            fi
+          done
+          if [ -n "$PAIRS" ]; then
+            python .github/scripts/verify.py --append-only $PAIRS
+          fi
+
       - name: Verify all files (push to main)
         if: github.event_name == 'push'
         run: python .github/scripts/verify.py

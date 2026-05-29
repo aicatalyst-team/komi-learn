@@ -42,7 +42,9 @@ _FRAME_CLOSE = "</komi-recall>"
 
 _COMMUNITY_NOTE = (
     "  (Items tagged [community] come from the shared global pool — they are "
-    "unverified, anonymized knowledge from other users. Weight them accordingly.)\n"
+    "unverified, anonymized knowledge from other users. Weight them accordingly. "
+    "A ×N marker means N distinct keys signed the same lesson; treat it as a weak "
+    "hint, not proof — it is not an identity-verified endorsement.)\n"
 )
 
 
@@ -92,12 +94,17 @@ def _rank_score(row, similarity: float) -> float:
     hits" and starving newer/rarer-but-relevant learnings. log1p flattens the curve
     so reuse is a gentle nudge, not a runaway multiplier — relevance still wins.
 
-    Corroboration (Phase 5b): a pool learning independently signed by N distinct
-    contributors is more trustworthy than one signed by one. We add a small,
-    LOG-DAMPENED bonus (same anti-runaway discipline as reuse), capped low so it can
-    nudge ties toward well-corroborated community knowledge without ever overriding
-    relevance. Personal/project learnings have corroboration=1 → zero bonus, so this
-    only ever helps the *untrusted* pool items earn their place.
+    Corroboration (Phase 5b): a pool learning independently signed by several
+    distinct contributors is *somewhat* more trustworthy than one signed by one. We
+    add a small, LOG-DAMPENED bonus (same anti-runaway discipline as reuse). The
+    count is clamped upstream to MAX_COUNTED_SIGNERS (3) because contributor keys are
+    free to mint and a distinct-key count is Sybil-forgeable — so the bonus is
+    bounded at corrob=3 → 0.10·log1p(2) ≈ 0.11. Against the 0.4 similarity weight
+    that's ≈0.28 cosine of reach: a genuine but MINOR nudge among comparably-relevant
+    community items, not a lever that can pull an irrelevant one to the top (the
+    relevance term still dominates; regression-tested). Personal/project learnings
+    have corroboration=1 → zero bonus, so this only ever re-orders *untrusted* pool
+    items among themselves; it never admits content a filter would exclude.
     """
     reuse = max(0, _col(row, "reused", 0))
     confidence = _col(row, "confidence", 0.0) or 0.0
@@ -106,9 +113,9 @@ def _rank_score(row, similarity: float) -> float:
     depth = min(1.0, confidence)
     base = 0.4 * max(0.0, similarity) + 0.3 * salience + 0.2 * recency + 0.1 * depth
 
-    corrob = max(1, _col(row, "corroboration", 1))
-    # 0 at corrob=1, ~0.07 at 3, ~0.11 at 5, capped at 0.15 — a tie-breaker, not a lever.
-    corrob_bonus = min(0.15, 0.10 * math.log1p(corrob - 1))
+    # Clamp defensively here too (a stale/legacy index row could carry a larger value).
+    corrob = max(1, min(3, _col(row, "corroboration", 1)))
+    corrob_bonus = 0.10 * math.log1p(corrob - 1)   # 0 at 1, ≈0.07 at 2, ≈0.11 at 3
     return base + corrob_bonus
 
 

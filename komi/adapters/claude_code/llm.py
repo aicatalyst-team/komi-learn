@@ -215,8 +215,15 @@ Rules:
 - The title MUST be at the class level (e.g. "Working with pytest"), never a single
   task/PR/error.
 - Preserve substance: do not drop a member's specific fix or pitfall when merging.
-- If the cluster does NOT actually share a class (they're unrelated), return {} and
-  they'll be left alone."""
+- DECLINE generously. Merging is DESTRUCTIVE — the originals are archived — so only
+  merge when the members are genuinely facets of ONE skill that a single umbrella
+  serves better than separate entries. Return {} (leave them alone) when:
+    • the members are UNRELATED, OR
+    • they are related/same-domain but are DISTINCT skills a user would want to keep
+      separately (e.g. "filter tests by name with pytest -k" vs "stop at first failure
+      with pytest -x" — same tool, different techniques: do NOT merge), OR
+    • merging would force you to drop or blur a member's specific guidance.
+  When in doubt, return {}. A missed merge is cheap; a wrong merge destroys a skill."""
 
 
 def build_consolidator(llm=None):
