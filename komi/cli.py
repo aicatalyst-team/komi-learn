@@ -32,6 +32,11 @@ def _p(line: str = "") -> None:
     print(line)
 
 
+def _clip(text: str, n: int) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
 # ── commands ───────────────────────────────────────────────────────────────
 
 def _cmd_install_codex(args) -> int:
@@ -359,6 +364,13 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--dry-run", action="store_true", help="preview changes without applying")
     pc.add_argument("--no-llm", action="store_true", help="prune only; don't merge clusters")
     pc.set_defaults(func=cmd_curate)
+
+    pf = sub.add_parser("forget", help="erase learnings matching a query or id")
+    pf.add_argument("query", help="text or id to match")
+    pf.add_argument("--hard", action="store_true",
+                    help="permanently delete (default: archive, recoverable)")
+    pf.add_argument("--host", choices=["claude-code", "codex"], default="claude-code")
+    pf.set_defaults(func=cmd_forget)
 
     pu = sub.add_parser("uninstall", help="remove komi-learn hooks (keeps data)")
     pu.add_argument("--host", choices=["claude-code", "codex"], default="claude-code",
