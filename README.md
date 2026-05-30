@@ -1,8 +1,17 @@
 # komi-learn
 
-**Your AI agent, minus the amnesia.** komi-learn watches how you work, quietly learns your preferences and the techniques that pan out, and reloads the relevant ones into every new session — automatically, with no commands to type.
+**Your AI agent, minus the amnesia.**
+
+[![PyPI](https://img.shields.io/pypi/v/komi-learn)](https://pypi.org/project/komi-learn/)
+[![Python](https://img.shields.io/pypi/pyversions/komi-learn)](https://pypi.org/project/komi-learn/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![CI](https://github.com/kurikomi-labs/komi-learn/actions/workflows/ci.yml/badge.svg)](https://github.com/kurikomi-labs/komi-learn/actions/workflows/ci.yml)
+
+Today's agents start every session from zero — re-learning your preferences, re-deriving the same workarounds, repeating corrected mistakes. **komi-learn** fixes that: it quietly watches how you work, distills the durable lessons (your style, your stack, techniques that pan out) in the background, and reloads the relevant ones into every new session — **automatically, with no commands to type.**
 
 Works with **Claude Code** and **OpenAI Codex**. One command to set up; then it just runs.
+
+> Inspired by [Hermes Agent](https://github.com/nousresearch/hermes-agent)'s self-improvement loop — rebuilt to be model-agnostic, universal, and *shareable* (see the community pool below). Early days — feedback very welcome. 🙏
 
 ---
 
@@ -121,6 +130,4 @@ Two sessions: you correct the agent's style and a debugging trick emerges in the
 | [`docs/05-adr-log.md`](docs/05-adr-log.md) | the key decisions and their trade-offs |
 | [`pool-repo-template/`](pool-repo-template/) | drop-in contents to run your own pool |
 
-Inspired by [Hermes Agent](https://github.com/nousresearch/hermes-agent)'s self-improvement loop — rebuilt to be model-agnostic, universal, and shareable.
-
-MIT licensed.
+MIT licensed. Contributions and feedback welcome — open an issue or PR.
