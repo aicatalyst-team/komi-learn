@@ -50,13 +50,19 @@
 - A non–Claude-Code adapter (Codex, or a chat UI) behind the same two-method interface (`recall()` + `on_session_end()`). The real test that the substrate isn't Claude-specific.
 - Persona validation (developer / finance / student / scientist on one substrate).
 
-**Phase 7 — Polish & open up** *(in progress)*
+**Phase 7 — Polish & open up** *(largely done)*
 - ✅ Lean, install-first README; root MIT LICENSE; public repo metadata.
-- 🔜 PyPI distribution (`pip install komi-learn`) — package built + verified; publish pending.
-- 🔜 Signer↔GitHub-account binding for corroboration (the Sybil fix deferred from the Phase 5 review — see ADR-9).
-- 🔜 Review-queue inspection UI (approve/reject pending global contributions).
-- 🔜 Erasure / redaction pipeline (PAM "right to be forgotten" — designed in §7.4, not built).
-- 🔜 Plugin-marketplace distribution; docs site.
+- ✅ **PyPI** — `pip install komi-learn` is live (v0.1.0), clean-venv verified.
+- ✅ **Signer↔GitHub-account binding** (the Sybil fix): signatures bind `github_user`,
+  corroboration counts distinct *accounts* not keys, CI enforces PR-author == signer
+  + an account-age bar. Back-compat preserved (empty username → pre-Phase-7 bytes). ADR-9.
+- ✅ **Review-queue inspection CLI** — `komi-learn queue list|approve|reject`
+  (approve signs with your username + opens a PR).
+- ✅ **Erasure / right-to-be-forgotten** — `komi-learn forget <query|id>` (archive,
+  or `--hard` for true deletion via `Store.delete`); pool-shared items print the
+  removal-PR path.
+- 🔜 Plugin-marketplace distribution; docs site. *(external polish.)*
+- 🔜 GitHub branch protection on both repos (UI; require the "Verify learnings" check).
 
 ## Known gaps / honest notes
 - Recall ranking is semantic (embeddings) when the model is installed, keyword FTS otherwise; both feed the same blend + a corroboration bonus.

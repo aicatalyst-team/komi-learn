@@ -47,6 +47,8 @@ komi-learn doctor      # is everything healthy? what to fix
 komi-learn status      # your settings + how much it's learned
 komi-learn config      # change any setting, anytime (menu)
 komi-learn sync        # pull the latest community learnings now
+komi-learn queue       # review/approve/reject what you'd share to the pool
+komi-learn forget <x>  # erase learnings matching <x> (archive, or --hard to delete)
 komi-learn uninstall   # remove it (keeps your learnings; --purge to wipe)
 ```
 
