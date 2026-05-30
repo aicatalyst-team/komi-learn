@@ -299,6 +299,117 @@ def cmd_login(args) -> int:
     return rc
 
 
+def cmd_queue(args) -> int:
+    """Inspect + act on the global-contribution review queue (the human gate).
+
+    Nothing reaches the public pool without passing through here. `list` shows what's
+    pending; `approve <i>` signs it (binding your GitHub username) and opens a PR;
+    `reject <i>` discards it (kept for audit, never published)."""
+    from komi import cli_prompt as PR
+    from komi.pool.queue import list_queue, set_status, publish_approved
+    paths = _host_paths(getattr(args, "host", "claude-code"))
+    pending = list_queue(paths.queue_dir(), status="pending-review")
+    action = getattr(args, "queue_action", None) or "list"
+
+    if action == "list":
+        if not pending:
+            _p("  review queue is empty — nothing waiting to be shared.")
+            return 0
+        _p(f"  {len(pending)} learning(s) pending your approval for the global pool:\n")
+        for i, item in enumerate(pending):
+            _p(f"  [{i}] {item.learning.title}")
+            _p(f"      {_clip(item.learning.body, 100)}")
+            _p(f"      {item.learning.category} · id {item.learning.id[:18]}…\n")
+        _p("  Approve:  komi-learn queue approve <index>   (opens a PR)")
+        _p("  Reject:   komi-learn queue reject <index>")
+        return 0
+
+    idx = getattr(args, "index", None)
+    if idx is None or idx < 0 or idx >= len(pending):
+        _p(f"  no queued item at index {idx}. Run `komi-learn queue list` for indices.")
+        return 1
+    item = pending[idx]
+
+    if action == "reject":
+        set_status(item, "rejected")
+        _p(f"  rejected: {item.learning.title}")
+        return 0
+
+    # approve → mark approved, then sign (with github_user) + publish via the pool
+    from komi.adapters.claude_code import config as cfg_mod
+    from komi.pool.identity import Contributor
+    from komi.pool.github_backend import GitHubPool, PoolConfig
+    cfg = cfg_mod.load()
+    if not cfg.pool_enabled:
+        _p("  no pool configured (set pool.repo_url) — can't publish.")
+        return 1
+    gh_user = getattr(cfg, "pool_github_user", "") or ""
+    if not gh_user and not PR.ask_yes_no(
+            "  No GitHub username set (contribution won't be account-verified). "
+            "Contribute anyway?", default=False):
+        _p("  Set it with:  komi-learn config set pool.github_user <you>")
+        return 1
+    set_status(item, "approved")
+    pool = GitHubPool(PoolConfig(repo_url=cfg.pool_repo_url, cache_dir=cfg.pool_cache_dir,
+                                 branch=cfg.pool_branch, mode=cfg.pool_mode,
+                                 require_signature=cfg.pool_require_signature))
+    results = publish_approved(paths.queue_dir(), pool, Contributor(paths.keys_dir()),
+                               only_id=item.id, github_user=gh_user)
+    res = results[0] if results else {"published": False, "reason": "not-processed"}
+    if res.get("published"):
+        _p(f"  published: {item.learning.title}")
+        if res.get("pr_url"):
+            _p(f"    PR: {res['pr_url']}")
+        return 0
+    _p(f"  publish failed: {res.get('reason') or res.get('detail')}  "
+       "(still approved; try `komi-learn sync` then retry)")
+    return 1
+
+
+def cmd_forget(args) -> int:
+    """Erase learnings matching a query or id (the 'right to be forgotten' path).
+
+    Local learnings are archived by default (recoverable) or hard-deleted with
+    --hard. A learning already shared to the public pool can't be unilaterally
+    erased — it's archived locally and the removal-PR path is printed."""
+    from komi import cli_prompt as PR
+    from komi.engine.store import Store
+    paths = _host_paths(getattr(args, "host", "claude-code"))
+    store = Store(paths.personal_root(), index_path=paths.index_path())
+    query = (getattr(args, "query", "") or "").strip()
+    if not query:
+        _p("  usage: komi-learn forget <text-or-id>   [--hard]")
+        return 1
+
+    matches = [l for l in store.all()
+               if l.lifecycle.state == "active"
+               and query.lower() in f"{l.id} {l.title} {l.body} {l.trigger}".lower()]
+    if not matches:
+        _p(f"  no active learnings match {query!r}.")
+        return 0
+
+    _p(f"  {len(matches)} learning(s) match {query!r}:")
+    for l in matches:
+        _p(f"    - {l.title}  ({l.scope}, id {l.id[:16]}…)")
+    hard = getattr(args, "hard", False)
+    if not PR.ask_yes_no(f"  {'DELETE permanently' if hard else 'archive (recoverable)'} "
+                         f"these {len(matches)}?", default=False):
+        _p("  cancelled.")
+        return 0
+
+    for l in matches:
+        if l.scope == "global" and l.provenance.origin == "pool":
+            _p(f"  ! '{l.title}' came from the public pool — archived locally; to remove")
+            _p("    it from the shared pool, open a PR deleting its file in the pool repo.")
+            store.archive(l.id)
+        elif hard:
+            store.delete(l.id)
+        else:
+            store.archive(l.id)
+    _p(f"  {'deleted' if hard else 'archived'} {len(matches)} learning(s).")
+    return 0
+
+
 def cmd_uninstall(args) -> int:
     if getattr(args, "host", "claude-code") == "codex":
         from komi.adapters.codex import setup as codex_setup
@@ -364,6 +475,16 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--dry-run", action="store_true", help="preview changes without applying")
     pc.add_argument("--no-llm", action="store_true", help="prune only; don't merge clusters")
     pc.set_defaults(func=cmd_curate)
+
+    pq = sub.add_parser("queue", help="review/approve/reject pending pool contributions")
+    pq.add_argument("--host", choices=["claude-code", "codex"], default="claude-code")
+    qsub = pq.add_subparsers(dest="queue_action")
+    qsub.add_parser("list", help="show learnings awaiting your approval (default)")
+    qa = qsub.add_parser("approve", help="sign + open a PR for a queued learning")
+    qa.add_argument("index", type=int, help="index from `queue list`")
+    qr = qsub.add_parser("reject", help="drop a queued learning")
+    qr.add_argument("index", type=int, help="index from `queue list`")
+    pq.set_defaults(func=cmd_queue)
 
     pf = sub.add_parser("forget", help="erase learnings matching a query or id")
     pf.add_argument("query", help="text or id to match")

@@ -69,17 +69,20 @@ def publish_approved(
     *,
     project_terms: Optional[list[str]] = None,
     only_id: Optional[str] = None,
+    github_user: str = "",
 ) -> list[dict]:
     """Publish every ``approved`` queue item (or just ``only_id``) to the pool.
 
     Returns a list of result dicts. Each item is re-prepared (scrub + sign) at
     publish time; if the scrub now blocks it, it is skipped with a reason (the
-    floor still wins, even post-approval)."""
+    floor still wins, even post-approval). ``github_user`` (Phase 7) is bound into
+    the signature so the pool's CI can verify the PR author + count distinct accounts."""
     results: list[dict] = []
     for item in list_queue(queue_dir, status="approved"):
         if only_id and item.id != only_id:
             continue
-        prep = prepare_contribution(item.learning, contributor, project_terms=project_terms)
+        prep = prepare_contribution(item.learning, contributor,
+                                    project_terms=project_terms, github_user=github_user)
         if not prep.ok:
             results.append({"id": item.id, "published": False, "reason": prep.reason})
             continue
