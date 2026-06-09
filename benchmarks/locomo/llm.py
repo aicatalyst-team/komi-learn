@@ -29,13 +29,17 @@ class ClaudeCLI:
         exe = shutil.which("claude")
         if not exe:
             raise RuntimeError("`claude` CLI not found on PATH — install it or use --fake")
-        cmd = [exe, "-p", prompt]
+        # Pass the prompt on STDIN, not argv. A full-context prompt is ~78k chars and
+        # Windows caps a command line at ~32k → `claude -p "<giant>"` raises WinError 206
+        # ("filename or extension too long"), which the except below swallows to "",
+        # silently scoring full-context 0%. stdin has no such limit.
+        cmd = [exe, "-p"]
         if self.model:
             cmd += ["--model", self.model]
         self.calls += 1
         try:
             out = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=self.timeout,
+                cmd, input=prompt, capture_output=True, text=True, timeout=self.timeout,
                 encoding="utf-8", errors="replace",
             )
             return (out.stdout or "").strip()

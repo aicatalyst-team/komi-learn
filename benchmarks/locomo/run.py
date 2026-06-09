@@ -86,6 +86,19 @@ def main(argv=None) -> int:
     else:
         llm = ClaudeCLI(model=args.model)
         judge = ClaudeCLI(model=args.judge_model)
+        # PREFLIGHT: a full-context prompt is ~78k chars. Earlier this silently failed
+        # (Windows argv limit) and scored full-context 0% — a fake result that looked
+        # like 'md-pile beats komi'. Prove the LLM answers a LARGE prompt before spending
+        # an hour, and abort loudly if not.
+        probe = ("Here is a long document. Reply with ONLY the word READY.\n"
+                 + ("context filler. " * 6000))      # ~96k chars, above full-context scale
+        reply = llm.complete(probe)
+        if "ready" not in reply.lower():
+            print(f"PREFLIGHT FAILED: the claude CLI did not answer a large (~{len(probe)//1000}k "
+                  f"char) prompt (got {reply!r:.60}). Aborting before spending — fix the LLM "
+                  f"path, don't trust a 0% full-context score.")
+            return 2
+        print(f"  preflight ok (LLM answered a {len(probe)//1000}k-char prompt)")
 
     def progress(cond, conv_id, i, total, correct):
         mark = "+" if correct else "."
@@ -117,9 +130,19 @@ def _report(results, args, llm, judge) -> None:
     print("\n" + "=" * 72)
     print(f"{'condition':14} {'J-score':>8} {'avg-tok':>9} {'J/1k-tok':>9}   by-category")
     print("-" * 72)
+    suspect = []
     for name, r in results.items():
         cats = " ".join(f"{k}:{v}" for k, v in r.by_category().items())
-        print(f"{name:14} {r.j_score:7.1f}% {r.avg_tokens:9.0f} {r.efficiency:9.2f}   {cats}")
+        empty = sum(1 for row in r.rows if not row.pred.strip()) if r.rows else 0
+        empty_rate = (100.0 * empty / r.n) if r.n else 0.0
+        flag = ""
+        # A condition that answered NOTHING (all-empty) almost always means a harness/LLM
+        # failure (e.g. prompt too big for the transport), not a real 0% — flag it so the
+        # score is never mistaken for a finding.
+        if empty_rate >= 90.0:
+            flag = "  <-- SUSPECT: {:.0f}% empty answers (harness/LLM failure, not a real score)".format(empty_rate)
+            suspect.append(name)
+        print(f"{name:14} {r.j_score:7.1f}% {r.avg_tokens:9.0f} {r.efficiency:9.2f}   {cats}{flag}")
     print("=" * 72)
 
     out = {

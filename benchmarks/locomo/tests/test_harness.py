@@ -101,6 +101,32 @@ def test_judge_shortcuts_save_calls():
     assert llm.calls == 0
 
 
+def test_claude_cli_passes_prompt_on_stdin_not_argv(monkeypatch):
+    """Regression: a full-context prompt is ~78k chars; passing it as an argv argument
+    blows the Windows command-line limit (WinError 206) and silently returns "" — which
+    scored full-context 0% and nearly produced a false 'md-pile beats komi' result. The
+    prompt MUST go on stdin. Pin it by asserting the prompt is fed via stdin, not argv."""
+    import benchmarks.locomo.llm as llm_mod
+    captured = {}
+
+    class _FakeProc:
+        stdout = "OK"
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["input"] = kw.get("input")
+        return _FakeProc()
+
+    monkeypatch.setattr(llm_mod.shutil, "which", lambda _: "claude")
+    monkeypatch.setattr(llm_mod.subprocess, "run", fake_run)
+    big = "x" * 78000
+    out = llm_mod.ClaudeCLI().complete(big)
+    assert out == "OK"
+    # the giant prompt must be on stdin, and must NOT appear as an argv element
+    assert captured["input"] == big
+    assert big not in captured["cmd"]
+
+
 def test_full_context_costs_more_tokens_than_recall():
     """The whole thesis in miniature: selective recall uses fewer context tokens than
     dumping everything. (Accuracy is compared on the real benchmark; here we pin the
