@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: komi-learn-cli-help
+  namespace: poc-komi-learn
+  labels:
+    app: komi-learn
+    autopoc.io/project: komi-learn
+    autopoc.io/scenario: cli-help
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 60
+  template:
+    spec:
+      containers:
+        - name: komi-learn
+          image: image-registry.openshift-image-registry.svc:5000/autopoc-test-builds/komi-learn:latest
+          imagePullPolicy: Always
+          command: ["komi-learn"]
+          args: ["--help"]
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      restartPolicy: Never

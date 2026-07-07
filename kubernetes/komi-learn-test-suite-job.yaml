@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: komi-learn-test-suite
+  namespace: poc-komi-learn
+  labels:
+    app: komi-learn
+    autopoc.io/project: komi-learn
+    autopoc.io/scenario: test-suite
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      containers:
+        - name: komi-learn
+          image: image-registry.openshift-image-registry.svc:5000/autopoc-test-builds/komi-learn:latest
+          imagePullPolicy: Always
+          command: ["python"]
+          args: ["-m", "pytest", "tests/", "-x", "-q", "--tb=short"]
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      restartPolicy: Never
