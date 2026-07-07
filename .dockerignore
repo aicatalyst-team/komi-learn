@@ -1,0 +1,11 @@
+.git
+*.md
+!komi/**/*.md
+LICENSE
+__pycache__/
+*.pyc
+.env*
+*.egg-info/
+dist/
+build/
+.pytest_cache/
